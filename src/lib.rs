@@ -1,6 +1,5 @@
 pub mod keys;
 
-use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::{cmp, ptr};
 
@@ -172,6 +171,27 @@ impl<K: Key, V> Art<K, V> {
                 TypedNode::Combined(
                     Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
                     Leaf::new(key, value),
+                )
+            } else if leaf_key.is_empty() {
+                // existing leaf key is shorter than new key.
+                let key_bytes = &key_bytes[key_start_offset..];
+                let mut new_interim = if key_bytes.len() > 1 {
+                    Node4::new(&key_bytes[..key_bytes.len() - 1])
+                } else {
+                    Node4::new(&[])
+                };
+                // safely move out value from node holder because
+                // later we will override it without drop
+                let err = new_interim.insert(
+                    key_bytes[key_bytes.len() - 1],
+                    TypedNode::Leaf(Leaf::new(key, value)),
+                );
+                debug_assert!(err.is_none());
+
+                let existing_leaf = unsafe { ptr::read(leaf) };
+                TypedNode::Combined(
+                    Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
+                    existing_leaf,
                 )
             } else {
                 // do not account last byte of keys in prefix computation
@@ -736,7 +756,19 @@ mod tests {
     use crate::Art;
 
     #[test]
-    fn test_seq_insert() {
+    fn test_seq_insert_u8() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_seq_insert_u16() {
         let mut art = Art::new();
         for i in 0..=u16::MAX {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
@@ -745,22 +777,36 @@ mod tests {
         for i in 0..=u16::MAX {
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
+    }
 
+    #[test]
+    fn test_seq_insert_u32() {
         let mut art = Art::new();
-        for i in 0..=u32::MAX / 2 {
+        for i in 0..=(1 << 21) as u32 {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
         }
 
-        for i in 0..=u32::MAX / 2 {
+        for i in 0..=(1 << 21) as u32 {
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_seq_insert_with_increasing_key_size() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
 
-        // for i in u16::MAX as u32 + 1..=u32::MAX {
-        //     assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-        // }
-        //
-        // for i in u16::MAX as u32 + 1..=u32::MAX {
-        //     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
-        // }
+        for i in u8::MAX as u16 + 1..=u16::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+
+        for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
     }
 }
