@@ -86,9 +86,9 @@ impl<K: Key, V> Art<K, V> {
             key_bytes: &'k [u8],
         ) -> Option<(Option<&'n TypedNode<K, V>>, &'k [u8])> {
             let prefix = interim.prefix();
-            if common_prefix_len(prefix, &key_bytes[..key_bytes.len()]) != prefix.len() {
+            if common_prefix_len(prefix, key_bytes) != prefix.len() {
                 // node has prefix which is not prefix of search key
-                return None;
+                None
             } else {
                 if key_bytes.len() == prefix.len() {
                     // prefix of node exactly the same as key => no matches to key
@@ -151,7 +151,6 @@ impl<K: Key, V> Art<K, V> {
         let leaf = node.as_leaf_mut();
         if key != leaf.key {
             let leaf_key_bytes = leaf.key.to_bytes();
-            // debug_assert!(leaf_key_bytes.len() > key_bytes.len());
             let leaf_key = &leaf_key_bytes[key_start_offset..];
             let new_interim = if key_bytes.len() <= key_start_offset {
                 // no more bytes left in key, create combined node which will point to new key
@@ -186,7 +185,7 @@ impl<K: Key, V> Art<K, V> {
                 // safely move out value from node holder because
                 // later we will override it without drop
                 let leaf = unsafe { ptr::read(leaf) };
-                let mut new_interim = Node4::new(&leaf_key[0..prefix_size]);
+                let mut new_interim = Node4::new(&leaf_key[..prefix_size]);
                 let err = new_interim.insert(
                     key_bytes[prefix_size],
                     TypedNode::Leaf(Leaf::new(key, value)),
@@ -234,20 +233,22 @@ impl<K: Key, V> Art<K, V> {
 
         // Node prefix and key has partial common sequence. For instance, node prefix is
         // "abc" and key is "abde", common sequence will be "ab". This sequence will be
-        // used as prefix for new interim node and it will point to new leaf(with passed
+        // used as prefix for new interim node and this interim will point to new leaf(with passed
         // KV) and previous interim(with prefix "abc").
         if prefix_size < prefix.len() {
-            let mut new_interim = Node4::new(&prefix[0..prefix_size]);
+            let mut new_interim = Node4::new(&prefix[..prefix_size]);
             new_interim.insert(
                 key_bytes[prefix_size],
                 TypedNode::Leaf(Leaf::new(key, value)),
             );
             let mut interim = unsafe { ptr::read(interim) };
             // update prefix of existing interim to remaining part of old prefix.
-            // e.g., prefix was "abcd", prefix of new node is "ab".
+            // e.g, prefix was "abcd", prefix of new node is "ab".
             // Updated prefix will be "d" because "c" used as pointer inside new interim.
             if prefix_size + 1 < prefix.len() {
                 interim.set_prefix(&prefix[prefix_size + 1..]);
+            } else {
+                interim.set_prefix(&[]);
             }
             new_interim.insert(prefix[prefix_size], TypedNode::Interim(interim));
             unsafe {
@@ -741,8 +742,25 @@ mod tests {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
         }
 
-        for i in 0..u16::MAX {
+        for i in 0..=u16::MAX {
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
+
+        let mut art = Art::new();
+        for i in 0..=u32::MAX / 2 {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u32::MAX / 2 {
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+
+        // for i in u16::MAX as u32 + 1..=u32::MAX {
+        //     assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        // }
+        //
+        // for i in u16::MAX as u32 + 1..=u32::MAX {
+        //     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        // }
     }
 }
