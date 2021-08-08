@@ -1,7 +1,8 @@
 pub mod keys;
 
 use std::mem::MaybeUninit;
-use std::{cmp, ptr};
+use std::option::Option::Some;
+use std::{cmp, mem, ptr};
 
 pub struct Art<K, V> {
     root: Option<TypedNode<K, V>>,
@@ -34,11 +35,8 @@ impl<K: Key, V> Art<K, V> {
         );
 
         // create root node if not exists
-        if self.root.is_none() {
-            self.root = Some(TypedNode::Leaf(Leaf { key, value }));
-            true
-        } else {
-            let mut node = self.root.as_mut().unwrap();
+        if let Some(root) = &mut self.root {
+            let mut node = root;
             let mut key = key;
             let mut offset = 0;
             let mut val = value;
@@ -70,6 +68,66 @@ impl<K: Key, V> Art<K, V> {
                     }
                 }
             }
+        } else {
+            self.root = Some(TypedNode::Leaf(Leaf { key, value }));
+            true
+        }
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        if let Some(root) = &mut self.root {
+            let key_bytes_vec = key.to_bytes();
+            let mut key_bytes = key_bytes_vec.as_slice();
+            let mut parent_link = 0;
+            let mut parent: Option<&mut Node<TypedNode<K, V>>> = None;
+            let mut node_ptr = root as *mut TypedNode<K, V>;
+            loop {
+                match unsafe { &mut *node_ptr } {
+                    TypedNode::Leaf(leaf) => {
+                        return if key == &leaf.key {
+                            if let Some(p) = parent {
+                                if p.should_shrink() {
+                                    let parent = unsafe { ptr::read(p) };
+                                    *p = parent.shrink();
+                                }
+                                Some(p.remove(parent_link).unwrap().take_leaf().value)
+                            } else {
+                                Some(
+                                    mem::replace(&mut self.root, None)
+                                        .unwrap()
+                                        .take_leaf()
+                                        .value,
+                                )
+                            }
+                        } else {
+                            None
+                        };
+                    }
+                    TypedNode::Interim(interim) => {
+                        if let Some((next_node, rem_key_bytes, key)) =
+                            Self::find_in_interim_mut(interim, key_bytes)
+                        {
+                            node_ptr = next_node as *mut TypedNode<K, V>;
+                            parent = Some(interim);
+                            parent_link = key;
+                            key_bytes = rem_key_bytes;
+                        } else {
+                            return None;
+                        }
+                    }
+                    TypedNode::Combined(interim, leaf) => {
+                        if key == &leaf.key {
+                            let leaf = unsafe { ptr::read(leaf) };
+                            unsafe { ptr::write(node_ptr, *ptr::read(interim)) };
+                            return Some(leaf.value);
+                        } else {
+                            node_ptr = interim.as_mut() as *mut TypedNode<K, V>;
+                        }
+                    }
+                }
+            }
+        } else {
+            None
         }
     }
 
@@ -79,30 +137,6 @@ impl<K: Key, V> Art<K, V> {
             !key_vec.is_empty(),
             "Key must have non empty byte string representation"
         );
-
-        fn find_in_interim<'k, 'n, K, V>(
-            interim: &'n Node<TypedNode<K, V>>,
-            key_bytes: &'k [u8],
-        ) -> Option<(Option<&'n TypedNode<K, V>>, &'k [u8])> {
-            let prefix = interim.prefix();
-            if common_prefix_len(prefix, key_bytes) != prefix.len() {
-                // node has prefix which is not prefix of search key
-                None
-            } else {
-                if key_bytes.len() == prefix.len() {
-                    // prefix of node exactly the same as key => no matches to key
-                    // because all keys inside interim node longer at least by 1 byte.
-                    return None;
-                }
-                let next_node = interim.get(key_bytes[prefix.len()]);
-                let key_bytes = if key_bytes.len() > prefix.len() + 1 {
-                    &key_bytes[prefix.len() + 1..]
-                } else {
-                    &[]
-                };
-                Some((next_node, key_bytes))
-            }
-        }
 
         let mut node = self.root.as_ref();
         let mut key_bytes = key_vec.as_slice();
@@ -116,28 +150,66 @@ impl<K: Key, V> Art<K, V> {
                     }
                 }
                 TypedNode::Interim(interim) => {
-                    if let Some((next_node, rem_key_bytes)) = find_in_interim(interim, key_bytes) {
-                        node = next_node;
+                    if let Some((next_node, rem_key_bytes, _)) =
+                        Self::find_in_interim(interim, key_bytes)
+                    {
+                        node = Some(next_node);
                         key_bytes = rem_key_bytes;
                     } else {
-                        return None;
+                        node = None;
                     }
                 }
                 TypedNode::Combined(interim, leaf) => {
                     if key == &leaf.key {
                         return Some(&leaf.value);
-                    } else if let Some((next_node, rem_key_bytes)) =
-                        find_in_interim(interim.as_interim(), key_bytes)
+                    } else if let Some((next_node, rem_key_bytes, _)) =
+                        Self::find_in_interim(interim.as_interim(), key_bytes)
                     {
-                        node = next_node;
+                        node = Some(next_node);
                         key_bytes = rem_key_bytes;
                     } else {
-                        return None;
+                        node = None;
                     }
                 }
             }
         }
         None
+    }
+
+    fn find_in_interim<'k, 'n>(
+        interim: &'n Node<TypedNode<K, V>>,
+        key_bytes: &'k [u8],
+    ) -> Option<(&'n TypedNode<K, V>, &'k [u8], u8)> {
+        let node = unsafe {
+            #[allow(clippy::cast_ref_to_mut)]
+            &mut *(interim as *const Node<TypedNode<K, V>> as *mut Node<TypedNode<K, V>>)
+        };
+        Self::find_in_interim_mut(node, key_bytes)
+            .map(|(node, bytes, key)| (unsafe { &*(node as *const TypedNode<K, V>) }, bytes, key))
+    }
+
+    fn find_in_interim_mut<'k, 'n>(
+        interim: &'n mut Node<TypedNode<K, V>>,
+        key_bytes: &'k [u8],
+    ) -> Option<(&'n mut TypedNode<K, V>, &'k [u8], u8)> {
+        let prefix = interim.prefix().to_vec();
+        if common_prefix_len(&prefix, key_bytes) != prefix.len() || key_bytes.len() == prefix.len()
+        {
+            // node has prefix which is not prefix of search key
+            // or
+            // prefix of node exactly the same as key => no matches to key
+            // because all keys inside interim node longer at least by 1 byte.
+            None
+        } else {
+            interim.get_mut(key_bytes[prefix.len()]).map(|node| {
+                let key_bytes = if key_bytes.len() > prefix.len() + 1 {
+                    &key_bytes[prefix.len() + 1..]
+                } else {
+                    &[]
+                };
+                (node, key_bytes, key_bytes[prefix.len()])
+            })
+        }
     }
 
     fn replace_leaf(
@@ -341,6 +413,13 @@ impl<K, V> TypedNode<K, V> {
         }
     }
 
+    fn take_leaf(self) -> Leaf<K, V> {
+        match self {
+            TypedNode::Leaf(node) => node,
+            _ => panic!("Only leaf can be retrieved"),
+        }
+    }
+
     fn as_interim_mut(&mut self) -> &mut Node<TypedNode<K, V>> {
         match self {
             TypedNode::Interim(node) => node,
@@ -393,6 +472,15 @@ impl<V> Node<V> {
         }
     }
 
+    fn remove(&mut self, key: u8) -> Option<V> {
+        match self {
+            Node::Size4(node) => node.remove(key),
+            Node::Size16(node) => node.remove(key),
+            Node::Size48(node) => node.remove(key),
+            Node::Size256(node) => node.remove(key),
+        }
+    }
+
     fn set_prefix(&mut self, prefix: &[u8]) {
         match self {
             Node::Size4(node) => node.prefix = prefix.to_vec(),
@@ -408,6 +496,24 @@ impl<V> Node<V> {
             Node::Size16(node) => Node::Size48(Box::new(node.expand())),
             Node::Size48(node) => Node::Size256(Box::new(node.expand())),
             Node::Size256(_) => self,
+        }
+    }
+
+    fn should_shrink(&self) -> bool {
+        match self {
+            Node::Size4(_) => false,
+            Node::Size16(node) => node.len <= 4,
+            Node::Size48(node) => node.len <= 16,
+            Node::Size256(node) => node.len <= 48,
+        }
+    }
+
+    fn shrink(self) -> Node<V> {
+        match self {
+            Node::Size4(_) => self,
+            Node::Size16(node) => Node::Size4(Box::new(node.shrink())),
+            Node::Size48(node) => Node::Size16(Box::new(node.shrink())),
+            Node::Size256(node) => Node::Size48(Box::new(node.shrink())),
         }
     }
 
@@ -484,6 +590,34 @@ impl<V> Node4<V> {
                 None
             },
             |_| Some(InsertError::DuplicateKey),
+        )
+    }
+
+    fn remove(&mut self, key: u8) -> Option<V> {
+        self.keys[..self.len].binary_search(&key).map_or_else(
+            |i| {
+                let val = unsafe {
+                    mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
+                };
+                self.len -= 1;
+                if self.len > 0 {
+                    // shift array elements to left side to compact value space
+                    unsafe {
+                        ptr::copy(
+                            self.keys[i + 1..].as_ptr(),
+                            self.keys[i..].as_mut_ptr(),
+                            self.len - i,
+                        );
+                        ptr::copy(
+                            self.values[i + 1..].as_ptr(),
+                            self.values[i..].as_mut_ptr(),
+                            self.len - i,
+                        );
+                    }
+                }
+                Some(val)
+            },
+            |_| None,
         )
     }
 
@@ -587,8 +721,50 @@ impl<V> Node16<V> {
         )
     }
 
+    fn remove(&mut self, key: u8) -> Option<V> {
+        self.keys[..self.len].binary_search(&key).map_or_else(
+            |i| {
+                let val = unsafe {
+                    mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
+                };
+                self.len -= 1;
+                if self.len > 0 {
+                    // shift array elements to left side to compact value space
+                    unsafe {
+                        ptr::copy(
+                            self.keys[i + 1..].as_ptr(),
+                            self.keys[i..].as_mut_ptr(),
+                            self.len - i,
+                        );
+                        ptr::copy(
+                            self.values[i + 1..].as_ptr(),
+                            self.values[i..].as_mut_ptr(),
+                            self.len - i,
+                        );
+                    }
+                }
+                Some(val)
+            },
+            |_| None,
+        )
+    }
+
     fn expand(mut self) -> Node48<V> {
         let mut new_node = Node48::new(&self.prefix);
+        for (i, key) in self.keys[..self.len].iter().enumerate() {
+            let val = unsafe { ptr::read(&self.values[i]).assume_init() };
+            let res = new_node.insert(*key, val);
+            debug_assert!(res.is_none());
+        }
+
+        // emulate that all values was moved out from node before drop
+        self.len = 0;
+        new_node
+    }
+
+    fn shrink(mut self) -> Node4<V> {
+        debug_assert!(self.len <= 4);
+        let mut new_node = Node4::new(&self.prefix);
         for (i, key) in self.keys[..self.len].iter().enumerate() {
             let val = unsafe { ptr::read(&self.values[i]).assume_init() };
             let res = new_node.insert(*key, val);
@@ -668,8 +844,49 @@ impl<V> Node48<V> {
         None
     }
 
+    fn remove(&mut self, key: u8) -> Option<V> {
+        let key_idx = key as usize;
+        if self.keys[key_idx] == 0 {
+            return None;
+        }
+        let val_idx = self.keys[key_idx] as usize - 1;
+        let val =
+            unsafe { mem::replace(&mut self.values[val_idx], MaybeUninit::uninit()).assume_init() };
+        self.keys[key_idx] = 0;
+        // TODO: replace by SIMD search
+        for i in 0..self.keys.len() {
+            // find key which uses last cell inside values array
+            if self.keys[i] == self.len as u8 {
+                // move value of key which points to last array cell
+                self.keys[i] = val_idx as u8 + 1;
+                let val = mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
+                self.values[val_idx] = val;
+                break;
+            }
+        }
+        self.len -= 1;
+        Some(val)
+    }
+
     fn expand(mut self) -> Node256<V> {
         let mut new_node = Node256::new(&self.prefix);
+        for (i, key) in self.keys.iter().enumerate() {
+            let val_idx = *key as usize;
+            if val_idx > 0 {
+                let val = unsafe { ptr::read(&self.values[val_idx - 1]).assume_init() };
+                let err = new_node.insert(i as u8, val);
+                debug_assert!(err.is_none());
+            }
+        }
+
+        // emulate that all values was moved out from node before drop
+        self.len = 0;
+        new_node
+    }
+
+    fn shrink(mut self) -> Node16<V> {
+        debug_assert!(self.len <= 16);
+        let mut new_node = Node16::new(&self.prefix);
         for (i, key) in self.keys.iter().enumerate() {
             let val_idx = *key as usize;
             if val_idx > 0 {
@@ -707,6 +924,7 @@ impl<V> Node48<V> {
 
 struct Node256<V> {
     prefix: Vec<u8>,
+    len: usize,
     values: [Option<V>; 256],
 }
 
@@ -722,6 +940,7 @@ impl<V> Node256<V> {
         }
         Self {
             prefix: prefix.to_vec(),
+            len: 0,
             values,
         }
     }
@@ -730,10 +949,33 @@ impl<V> Node256<V> {
         let i = key as usize;
         if self.values[i].is_none() {
             self.values[i] = Some(value);
+            self.len += 1;
             None
         } else {
             Some(InsertError::DuplicateKey)
         }
+    }
+
+    fn remove(&mut self, key: u8) -> Option<V> {
+        let i = key as usize;
+        mem::replace(&mut self.values[i], None).map(|v| {
+            self.len -= 1;
+            v
+        })
+    }
+
+    fn shrink(mut self) -> Node48<V> {
+        debug_assert!(self.len <= 48);
+        let mut new_node = Node48::new(&self.prefix);
+        for i in 0..self.values.len() {
+            if let Some(val) = mem::replace(&mut self.values[i], None) {
+                let res = new_node.insert(i as u8, val);
+                debug_assert!(res.is_none());
+            }
+        }
+
+        self.len = 0;
+        new_node
     }
 
     fn get(&self, key: u8) -> Option<&V> {
@@ -807,6 +1049,18 @@ mod tests {
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_seq_remove_u8() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
         }
     }
 }
