@@ -87,8 +87,10 @@ impl<K: Key, V> Art<K, V> {
                         return if key == &leaf.key {
                             if let Some(p) = parent {
                                 if p.should_shrink() {
-                                    let parent = unsafe { ptr::read(p) };
-                                    *p = parent.shrink();
+                                    unsafe {
+                                        let new_node = ptr::read(p).shrink();
+                                        ptr::write(p, new_node);
+                                    };
                                 }
                                 Some(p.remove(parent_link).unwrap().take_leaf().value)
                             } else {
@@ -193,7 +195,7 @@ impl<K: Key, V> Art<K, V> {
         key_bytes: &'k [u8],
     ) -> Option<(&'n mut TypedNode<K, V>, &'k [u8], u8)> {
         let prefix = interim.prefix().to_vec();
-        if common_prefix_len(&prefix, key_bytes) != prefix.len() || key_bytes.len() == prefix.len()
+        if key_bytes.len() == prefix.len() || common_prefix_len(&prefix, key_bytes) != prefix.len()
         {
             // node has prefix which is not prefix of search key
             // or
@@ -202,12 +204,13 @@ impl<K: Key, V> Art<K, V> {
             None
         } else {
             interim.get_mut(key_bytes[prefix.len()]).map(|node| {
+                let key_in_parent = key_bytes[prefix.len()];
                 let key_bytes = if key_bytes.len() > prefix.len() + 1 {
                     &key_bytes[prefix.len() + 1..]
                 } else {
                     &[]
                 };
-                (node, key_bytes, key_bytes[prefix.len()])
+                (node, key_bytes, key_in_parent)
             })
         }
     }
@@ -595,6 +598,7 @@ impl<V> Node4<V> {
 
     fn remove(&mut self, key: u8) -> Option<V> {
         self.keys[..self.len].binary_search(&key).map_or_else(
+            |_| None,
             |i| {
                 let val = unsafe {
                     mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
@@ -617,7 +621,6 @@ impl<V> Node4<V> {
                 }
                 Some(val)
             },
-            |_| None,
         )
     }
 
@@ -723,6 +726,7 @@ impl<V> Node16<V> {
 
     fn remove(&mut self, key: u8) -> Option<V> {
         self.keys[..self.len].binary_search(&key).map_or_else(
+            |_| None,
             |i| {
                 let val = unsafe {
                     mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
@@ -745,7 +749,6 @@ impl<V> Node16<V> {
                 }
                 Some(val)
             },
-            |_| None,
         )
     }
 
@@ -1050,6 +1053,19 @@ mod tests {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
+
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+        }
+        for i in u8::MAX as u16 + 1..=u16::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+        }
+        for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
+            println!("{}", i);
+            let res = art.remove(&ByteString::from(i));
+            println!("{:?}", res);
+            assert!(matches!(res, Some(val) if val == i.to_string()));
+        }
     }
 
     #[test]
@@ -1061,6 +1077,33 @@ mod tests {
 
         for i in 0..=u8::MAX {
             assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&ByteString::from(i)), None));
+        }
+    }
+
+    #[test]
+    fn test_seq_remove_u16() {
+        let mut art = Art::new();
+        for i in 0..=u16::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u16::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&ByteString::from(i)), None));
+        }
+    }
+
+    #[test]
+    fn test_seq_remove_u32() {
+        let mut art = Art::new();
+        for i in 0..=(1 << 21) as u32 {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=(1 << 21) as u32 {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&ByteString::from(i)), None));
         }
     }
 }
