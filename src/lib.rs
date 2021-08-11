@@ -84,6 +84,7 @@ impl<K: Key, V> Art<K, V> {
             loop {
                 match unsafe { &mut *node_ptr } {
                     TypedNode::Leaf(leaf) => {
+                        // TODO: merge nodes if parent contains only link to child node
                         return if key == &leaf.key {
                             if let Some(p) = parent {
                                 if p.should_shrink() {
@@ -197,10 +198,10 @@ impl<K: Key, V> Art<K, V> {
         let prefix = interim.prefix().to_vec();
         if key_bytes.len() == prefix.len() || common_prefix_len(&prefix, key_bytes) != prefix.len()
         {
-            // node has prefix which is not prefix of search key
-            // or
             // prefix of node exactly the same as key => no matches to key
-            // because all keys inside interim node longer at least by 1 byte.
+            // because all keys inside interim node longer at least by 1 byte
+            // or
+            // node has prefix which is not prefix of search key.
             None
         } else {
             interim.get_mut(key_bytes[prefix.len()]).map(|node| {
@@ -227,10 +228,10 @@ impl<K: Key, V> Art<K, V> {
             let leaf_key_bytes = leaf.key.to_bytes();
             let leaf_key = &leaf_key_bytes[key_start_offset..];
             let new_interim = if key_bytes.len() <= key_start_offset {
-                // no more bytes left in key, create combined node which will point to new key
-                // and existing leaf will be moved into new interim node.
+                // no more bytes left in key of new KV => create combined node which will
+                // point to new key and existing leaf will be moved into new interim node.
                 // in this case, key of existing leaf is always longer(length in bytes) than new
-                // key. If leaf key has the same length as new key, then keys are equal.
+                // key(if leaf key has the same length as new key, then keys are equal).
                 let mut new_interim = if leaf_key.len() > 1 {
                     Node4::new(&leaf_key[..leaf_key.len() - 1])
                 } else {
@@ -337,6 +338,7 @@ impl<K: Key, V> Art<K, V> {
                 TypedNode::Leaf(Leaf::new(key, value)),
             );
             let mut interim = unsafe { ptr::read(interim) };
+            let interim_key = prefix[prefix_size];
             // update prefix of existing interim to remaining part of old prefix.
             // e.g, prefix was "abcd", prefix of new node is "ab".
             // Updated prefix will be "d" because "c" used as pointer inside new interim.
@@ -345,7 +347,7 @@ impl<K: Key, V> Art<K, V> {
             } else {
                 interim.set_prefix(&[]);
             }
-            new_interim.insert(prefix[prefix_size], TypedNode::Interim(interim));
+            new_interim.insert(interim_key, TypedNode::Interim(interim));
             unsafe {
                 ptr::write(
                     node_ptr,
@@ -862,8 +864,8 @@ impl<V> Node48<V> {
             if self.keys[i] == self.len as u8 {
                 // move value of key which points to last array cell
                 self.keys[i] = val_idx as u8 + 1;
-                let val = mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
-                self.values[val_idx] = val;
+                self.values[val_idx] =
+                    mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
                 break;
             }
         }
@@ -873,11 +875,11 @@ impl<V> Node48<V> {
 
     fn expand(mut self) -> Node256<V> {
         let mut new_node = Node256::new(&self.prefix);
-        for (i, key) in self.keys.iter().enumerate() {
-            let val_idx = *key as usize;
+        for (key, i) in self.keys.iter().enumerate() {
+            let val_idx = *i as usize;
             if val_idx > 0 {
                 let val = unsafe { ptr::read(&self.values[val_idx - 1]).assume_init() };
-                let err = new_node.insert(i as u8, val);
+                let err = new_node.insert(key as u8, val);
                 debug_assert!(err.is_none());
             }
         }
@@ -1043,14 +1045,23 @@ mod tests {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
 
         for i in u8::MAX as u16 + 1..=u16::MAX {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
+        for i in u8::MAX as u16 + 1..=u16::MAX {
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
 
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        }
+        for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
             assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
         }
 
@@ -1061,10 +1072,7 @@ mod tests {
             assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
         }
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
-            println!("{}", i);
-            let res = art.remove(&ByteString::from(i));
-            println!("{:?}", res);
-            assert!(matches!(res, Some(val) if val == i.to_string()));
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
         }
     }
 
