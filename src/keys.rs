@@ -1,5 +1,6 @@
 use crate::Key;
 
+#[derive(Clone, PartialOrd, Ord, Debug)]
 pub struct ByteString {
     bytes: Vec<u8>,
 }

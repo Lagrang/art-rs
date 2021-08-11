@@ -11,3 +11,6 @@ description = "The Adaptive Radix Tree for Rust"
 keywords = ["radix", "tree", "adaptive"]
 categories = ["data-structures"]
 include = ["src/", "LICENSE", "README.md", "CHANGELOG.md"]
+
+[dev-dependencies]
+rand = "0.8.4"

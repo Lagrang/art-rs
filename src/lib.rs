@@ -51,7 +51,7 @@ impl<K: Key, V> Art<K, V> {
                             // contains leaf node for the same key.
                             Ok(false)
                         } else {
-                            Self::interim_insert(interim, key, val, &key_bytes, offset)
+                            Err((interim.as_mut(), offset, key, val))
                         }
                     }
                     TypedNode::Interim(_) => {
@@ -165,13 +165,8 @@ impl<K: Key, V> Art<K, V> {
                 TypedNode::Combined(interim, leaf) => {
                     if key == &leaf.key {
                         return Some(&leaf.value);
-                    } else if let Some((next_node, rem_key_bytes, _)) =
-                        Self::find_in_interim(interim.as_interim(), key_bytes)
-                    {
-                        node = Some(next_node);
-                        key_bytes = rem_key_bytes;
                     } else {
-                        node = None;
+                        node = Some(interim);
                     }
                 }
             }
@@ -227,41 +222,21 @@ impl<K: Key, V> Art<K, V> {
         if key != leaf.key {
             let leaf_key_bytes = leaf.key.to_bytes();
             let leaf_key = &leaf_key_bytes[key_start_offset..];
-            let new_interim = if key_bytes.len() <= key_start_offset {
-                // no more bytes left in key of new KV => create combined node which will
-                // point to new key and existing leaf will be moved into new interim node.
-                // in this case, key of existing leaf is always longer(length in bytes) than new
-                // key(if leaf key has the same length as new key, then keys are equal).
-                let mut new_interim = if leaf_key.len() > 1 {
-                    Node4::new(&leaf_key[..leaf_key.len() - 1])
-                } else {
-                    Node4::new(&[])
-                };
-                // safely move out value from node holder because
-                // later we will override it without drop
-                let existing_leaf = unsafe { ptr::read(leaf) };
-                let err = new_interim
-                    .insert(leaf_key[leaf_key.len() - 1], TypedNode::Leaf(existing_leaf));
-                debug_assert!(err.is_none());
+            let key_bytes = &key_bytes[key_start_offset..];
 
-                TypedNode::Combined(
-                    Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
-                    Leaf::new(key, value),
-                )
-            } else if leaf_key.is_empty() {
+            let prefix_size =
+                common_prefix_len(&leaf_key[..leaf_key.len()], &key_bytes[..key_bytes.len()]);
+
+            let prefix = &leaf_key[..prefix_size];
+            let leaf_key = &leaf_key[prefix_size..];
+            let key_bytes = &key_bytes[prefix_size..];
+
+            let new_interim = if leaf_key.is_empty() {
                 // existing leaf key is shorter than new key.
-                let key_bytes = &key_bytes[key_start_offset..];
-                let mut new_interim = if key_bytes.len() > 1 {
-                    Node4::new(&key_bytes[..key_bytes.len() - 1])
-                } else {
-                    Node4::new(&[])
-                };
+                let mut new_interim = Node4::new(prefix);
                 // safely move out value from node holder because
                 // later we will override it without drop
-                let err = new_interim.insert(
-                    key_bytes[key_bytes.len() - 1],
-                    TypedNode::Leaf(Leaf::new(key, value)),
-                );
+                let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
                 debug_assert!(err.is_none());
 
                 let existing_leaf = unsafe { ptr::read(leaf) };
@@ -269,26 +244,33 @@ impl<K: Key, V> Art<K, V> {
                     Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
                     existing_leaf,
                 )
-            } else {
-                // do not account last byte of keys in prefix computation
-                // because this byte will be used in interim node as pointer to leaf node
-                let key_bytes = &key_bytes[key_start_offset..];
-                let prefix_size = common_prefix_len(
-                    &leaf_key[..leaf_key.len() - 1],
-                    &key_bytes[..key_bytes.len() - 1],
-                );
+            } else if key_bytes.is_empty() {
+                // no more bytes left in key of new KV => create combined node which will
+                // point to new key and existing leaf will be moved into new interim node.
+                // in this case, key of existing leaf is always longer(length in bytes) than new
+                // key(if leaf key has the same length as new key, then keys are equal).
+                let mut new_interim = Node4::new(prefix);
+                // safely move out value from node holder because
+                // later we will override it without drop
+                let existing_leaf = unsafe { ptr::read(leaf) };
+                let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(existing_leaf));
+                debug_assert!(err.is_none());
 
+                TypedNode::Combined(
+                    Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
+                    Leaf::new(key, value),
+                )
+            } else {
                 // safely move out value from node holder because
                 // later we will override it without drop
                 let leaf = unsafe { ptr::read(leaf) };
-                let mut new_interim = Node4::new(&leaf_key[..prefix_size]);
-                let err = new_interim.insert(
-                    key_bytes[prefix_size],
-                    TypedNode::Leaf(Leaf::new(key, value)),
-                );
+                let mut new_interim = Node4::new(prefix);
+                let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
                 debug_assert!(err.is_none());
-                let err = new_interim.insert(leaf_key[prefix_size], TypedNode::Leaf(leaf));
-                debug_assert!(err.is_none());
+                let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(leaf));
+                if !err.is_none() {
+                    debug_assert!(err.is_none());
+                }
                 TypedNode::Interim(Node::Size4(Box::new(new_interim)))
             };
             unsafe { ptr::write(node, new_interim) };
@@ -589,9 +571,9 @@ impl<V> Node4<V> {
                         self.len - i,
                     );
                 }
-                self.len += 1;
                 self.keys[i] = key;
                 self.values[i] = MaybeUninit::new(value);
+                self.len += 1;
                 None
             },
             |_| Some(InsertError::DuplicateKey),
@@ -717,9 +699,9 @@ impl<V> Node16<V> {
                         self.len - i,
                     );
                 }
-                self.len += 1;
                 self.keys[i] = key;
                 self.values[i] = MaybeUninit::new(value);
+                self.len += 1;
                 None
             },
             |_| Some(InsertError::DuplicateKey),
@@ -844,8 +826,8 @@ impl<V> Node48<V> {
         }
 
         self.values[self.len as usize] = MaybeUninit::new(value);
+        self.keys[i] = self.len as u8 + 1;
         self.len += 1;
-        self.keys[i] = self.len as u8;
         None
     }
 
@@ -1001,9 +983,11 @@ enum InsertError<V> {
 mod tests {
     use crate::keys::ByteString;
     use crate::Art;
+    use rand::{thread_rng, Rng};
+    use std::collections::HashSet;
 
     #[test]
-    fn test_seq_insert_u8() {
+    fn seq_insert_u8() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
@@ -1015,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seq_insert_u16() {
+    fn seq_insert_u16() {
         let mut art = Art::new();
         for i in 0..=u16::MAX {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
@@ -1027,19 +1011,103 @@ mod tests {
     }
 
     #[test]
-    fn test_seq_insert_u32() {
+    fn seq_insert_u32() {
         let mut art = Art::new();
-        for i in 0..=(1 << 21) as u32 {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-        }
-
-        for i in 0..=(1 << 21) as u32 {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+        for shift in 0..2 {
+            let start = (u16::MAX as u32 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(
+                    matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string())
+                );
+            }
         }
     }
 
     #[test]
-    fn test_seq_insert_with_increasing_key_size() {
+    fn seq_insert_u64() {
+        let mut art = Art::new();
+        for shift in 0..4 {
+            let start = (u32::MAX as u64 + 1) << (shift * 8);
+            let end = start + 100_000;
+            for i in start..=end {
+                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(
+                    matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_u8() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&ByteString::from(i)), None));
+        }
+    }
+
+    #[test]
+    fn seq_remove_u16() {
+        let mut art = Art::new();
+        for i in 0..=u16::MAX {
+            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u16::MAX {
+            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&ByteString::from(i)), None));
+        }
+    }
+
+    #[test]
+    fn seq_remove_u32() {
+        let mut art = Art::new();
+        for shift in 0..2 {
+            let start = (u16::MAX as u32 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(
+                    matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string())
+                );
+                assert!(matches!(art.get(&ByteString::from(i)), None));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_u64() {
+        let mut art = Art::new();
+        for shift in 0..4 {
+            let start = (u32::MAX as u64 + 1) << (shift * 8);
+            let end = start + 100_000;
+            for i in start..=end {
+                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(
+                    matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string())
+                );
+                assert!(matches!(art.get(&ByteString::from(i)), None));
+            }
+        }
+    }
+
+    #[test]
+    fn modifications_with_seq_keys_with_increasing_size() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
             assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
@@ -1077,41 +1145,36 @@ mod tests {
     }
 
     #[test]
-    fn test_seq_remove_u8() {
+    fn insert_with_long_prefix() {
         let mut art = Art::new();
-        for i in 0..=u8::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-        }
-
-        for i in 0..=u8::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
-            assert!(matches!(art.get(&ByteString::from(i)), None));
-        }
-    }
-
-    #[test]
-    fn test_seq_remove_u16() {
-        let mut art = Art::new();
-        for i in 0..=u16::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-        }
-
-        for i in 0..=u16::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
-            assert!(matches!(art.get(&ByteString::from(i)), None));
-        }
-    }
-
-    #[test]
-    fn test_seq_remove_u32() {
-        let mut art = Art::new();
-        for i in 0..=(1 << 21) as u32 {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-        }
-
-        for i in 0..=(1 << 21) as u32 {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
-            assert!(matches!(art.get(&ByteString::from(i)), None));
+        // let mut art = Box::new(Art::new());
+        // let mut art = unsafe { &mut *Box::into_raw(art) };
+        let mut existing = HashSet::new();
+        let chars = ['a', 'b', 'c', 'd', 'e', 'f', 'x', 'y', 'z'];
+        for i in 0..chars.len() {
+            let level1_prefix = chars[i].to_string().repeat(thread_rng().gen_range(1..8));
+            for i in 0..chars.len() {
+                let level2_prefix = chars[i].to_string().repeat(thread_rng().gen_range(1..8));
+                let key_prefix = level1_prefix.clone() + &level2_prefix;
+                for _ in 0..=u8::MAX {
+                    let suffix: String = (0..thread_rng().gen_range(0..8))
+                        .map(|_| chars[thread_rng().gen_range(0..chars.len())])
+                        .collect();
+                    let string = key_prefix.clone() + &suffix;
+                    if existing.contains(&string) {
+                        continue;
+                    }
+                    assert!(
+                        art.insert(ByteString::new(string.as_bytes()), string.clone()),
+                        "{}",
+                        string
+                    );
+                    existing.insert(string.clone());
+                    assert!(
+                        matches!(art.get(&ByteString::new(string.as_bytes())), Some(val) if val == &string)
+                    );
+                }
+            }
         }
     }
 }
