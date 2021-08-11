@@ -983,6 +983,7 @@ enum InsertError<V> {
 mod tests {
     use crate::keys::ByteString;
     use crate::Art;
+    use rand::seq::SliceRandom;
     use rand::{thread_rng, Rng};
     use std::collections::HashSet;
 
@@ -1147,10 +1148,47 @@ mod tests {
     #[test]
     fn insert_with_long_prefix() {
         let mut art = Art::new();
-        // let mut art = Box::new(Art::new());
-        // let mut art = unsafe { &mut *Box::into_raw(art) };
+        long_prefix_test(&mut art, |art, key| {
+            assert!(
+                art.insert(ByteString::new(key.as_bytes()), key.clone()),
+                "{}",
+                key
+            );
+            assert!(matches!(art.get(&ByteString::new(key.as_bytes())), Some(val) if val == &key));
+        });
+    }
+
+    #[test]
+    fn remove_with_long_prefix() {
+        let mut art = Art::new();
         let mut existing = HashSet::new();
-        let chars = ['a', 'b', 'c', 'd', 'e', 'f', 'x', 'y', 'z'];
+        long_prefix_test(&mut art, |art, key| {
+            assert!(
+                art.insert(ByteString::new(key.as_bytes()), key.clone()),
+                "{}",
+                key
+            );
+            existing.insert(key);
+        });
+
+        for key in existing {
+            assert!(
+                matches!(art.remove(&ByteString::new(key.as_bytes())), Some(val) if val == key),
+                "{}",
+                key
+            );
+            assert!(matches!(art.get(&ByteString::new(key.as_bytes())), None));
+        }
+    }
+
+    fn long_prefix_test<F: FnMut(&mut Art<ByteString, String>, String)>(
+        art: &mut Art<ByteString, String>,
+        mut test_fn: F,
+    ) {
+        let mut existing = HashSet::new();
+        let mut chars = ['a', 'b', 'c', 'd', 'e', 'f', 'x', 'y', 'z'];
+        chars.shuffle(&mut thread_rng());
+        let chars = &chars[..thread_rng().gen_range(1..chars.len())];
         for i in 0..chars.len() {
             let level1_prefix = chars[i].to_string().repeat(thread_rng().gen_range(1..8));
             for i in 0..chars.len() {
@@ -1164,15 +1202,8 @@ mod tests {
                     if existing.contains(&string) {
                         continue;
                     }
-                    assert!(
-                        art.insert(ByteString::new(string.as_bytes()), string.clone()),
-                        "{}",
-                        string
-                    );
                     existing.insert(string.clone());
-                    assert!(
-                        matches!(art.get(&ByteString::new(string.as_bytes())), Some(val) if val == &string)
-                    );
+                    test_fn(art, string);
                 }
             }
         }
