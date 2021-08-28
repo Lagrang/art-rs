@@ -199,6 +199,8 @@ impl<K: Key, V> Art<K, V> {
             // node has prefix which is not prefix of search key.
             None
         } else {
+            // we have a prefix match, now try to find next byte of key which follows immediately
+            // after prefix.
             interim.get_mut(key_bytes[prefix.len()]).map(|node| {
                 let key_in_parent = key_bytes[prefix.len()];
                 let key_bytes = if key_bytes.len() > prefix.len() + 1 {
@@ -219,65 +221,62 @@ impl<K: Key, V> Art<K, V> {
         key_start_offset: usize,
     ) -> bool {
         let leaf = node.as_leaf_mut();
-        if key != leaf.key {
-            let leaf_key_bytes = leaf.key.to_bytes();
-            let leaf_key = &leaf_key_bytes[key_start_offset..];
-            let key_bytes = &key_bytes[key_start_offset..];
-
-            let prefix_size =
-                common_prefix_len(&leaf_key[..leaf_key.len()], &key_bytes[..key_bytes.len()]);
-
-            let prefix = &leaf_key[..prefix_size];
-            let leaf_key = &leaf_key[prefix_size..];
-            let key_bytes = &key_bytes[prefix_size..];
-
-            let new_interim = if leaf_key.is_empty() {
-                // existing leaf key is shorter than new key.
-                let mut new_interim = Node4::new(prefix);
-                // safely move out value from node holder because
-                // later we will override it without drop
-                let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
-                debug_assert!(err.is_none());
-
-                let existing_leaf = unsafe { ptr::read(leaf) };
-                TypedNode::Combined(
-                    Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
-                    existing_leaf,
-                )
-            } else if key_bytes.is_empty() {
-                // no more bytes left in key of new KV => create combined node which will
-                // point to new key and existing leaf will be moved into new interim node.
-                // in this case, key of existing leaf is always longer(length in bytes) than new
-                // key(if leaf key has the same length as new key, then keys are equal).
-                let mut new_interim = Node4::new(prefix);
-                // safely move out value from node holder because
-                // later we will override it without drop
-                let existing_leaf = unsafe { ptr::read(leaf) };
-                let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(existing_leaf));
-                debug_assert!(err.is_none());
-
-                TypedNode::Combined(
-                    Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
-                    Leaf::new(key, value),
-                )
-            } else {
-                // safely move out value from node holder because
-                // later we will override it without drop
-                let leaf = unsafe { ptr::read(leaf) };
-                let mut new_interim = Node4::new(prefix);
-                let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
-                debug_assert!(err.is_none());
-                let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(leaf));
-                if !err.is_none() {
-                    debug_assert!(err.is_none());
-                }
-                TypedNode::Interim(Node::Size4(Box::new(new_interim)))
-            };
-            unsafe { ptr::write(node, new_interim) };
-            true
-        } else {
-            false
+        if key == leaf.key {
+            return false;
         }
+
+        let leaf_key_bytes = leaf.key.to_bytes();
+        let leaf_key = &leaf_key_bytes[key_start_offset..];
+        let key_bytes = &key_bytes[key_start_offset..];
+
+        let prefix_size = common_prefix_len(leaf_key, key_bytes);
+
+        let prefix = &leaf_key[..prefix_size];
+        let leaf_key = &leaf_key[prefix_size..];
+        let key_bytes = &key_bytes[prefix_size..];
+
+        let new_interim = if leaf_key.is_empty() {
+            // existing leaf key is shorter than new key.
+            let mut new_interim = Node4::new(prefix);
+            // safely move out value from node holder because
+            // later we will override it without drop
+            let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
+            debug_assert!(err.is_none());
+
+            let existing_leaf = unsafe { ptr::read(leaf) };
+            TypedNode::Combined(
+                Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
+                existing_leaf,
+            )
+        } else if key_bytes.is_empty() {
+            // no more bytes left in key of new KV => create combined node which will
+            // point to new key and existing leaf will be moved into new interim node.
+            // in this case, key of existing leaf is always longer(length in bytes) than new
+            // key(if leaf key has the same length as new key, then keys are equal).
+            let mut new_interim = Node4::new(prefix);
+            // safely move out value from node holder because
+            // later we will override it without drop
+            let existing_leaf = unsafe { ptr::read(leaf) };
+            let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(existing_leaf));
+            debug_assert!(err.is_none());
+
+            TypedNode::Combined(
+                Box::new(TypedNode::Interim(Node::Size4(Box::new(new_interim)))),
+                Leaf::new(key, value),
+            )
+        } else {
+            // safely move out value from node holder because
+            // later we will override it without drop
+            let leaf = unsafe { ptr::read(leaf) };
+            let mut new_interim = Node4::new(prefix);
+            let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
+            debug_assert!(err.is_none());
+            let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(leaf));
+            debug_assert!(err.is_none());
+            TypedNode::Interim(Node::Size4(Box::new(new_interim)))
+        };
+        unsafe { ptr::write(node, new_interim) };
+        true
     }
 
     fn interim_insert<'n, 'k>(
@@ -307,18 +306,33 @@ impl<K: Key, V> Art<K, V> {
 
         let key_bytes = &key_bytes[key_start_offset..];
         let prefix = interim.prefix();
-        let prefix_size = common_prefix_len(prefix, &key_bytes[..key_bytes.len() - 1]);
+        let prefix_size = common_prefix_len(prefix, key_bytes);
 
-        // Node prefix and key has partial common sequence. For instance, node prefix is
-        // "abc" and key is "abde", common sequence will be "ab". This sequence will be
-        // used as prefix for new interim node and this interim will point to new leaf(with passed
-        // KV) and previous interim(with prefix "abc").
-        if prefix_size < prefix.len() {
+        if prefix_size == key_bytes.len() {
+            // existing interim prefix fully equals to new key: replace existing interim by combined
+            // node which will contain new key and link to existing values of interim
+            unsafe {
+                let interim = ptr::read(interim);
+                ptr::write(
+                    node_ptr,
+                    TypedNode::Combined(
+                        Box::new(TypedNode::Interim(interim)),
+                        Leaf::new(key, value),
+                    ),
+                )
+            };
+            Ok(true)
+        } else if prefix_size < prefix.len() {
+            // Node prefix and key has common byte sequence. For instance, node prefix is
+            // "abc" and key is "abde", common sequence will be "ab". This sequence will be
+            // used as prefix for new interim node and this interim will point to new leaf(with passed
+            // KV) and previous interim(with prefix "abc").
             let mut new_interim = Node4::new(&prefix[..prefix_size]);
-            new_interim.insert(
+            let res = new_interim.insert(
                 key_bytes[prefix_size],
                 TypedNode::Leaf(Leaf::new(key, value)),
             );
+            debug_assert!(res.is_none());
             let mut interim = unsafe { ptr::read(interim) };
             let interim_key = prefix[prefix_size];
             // update prefix of existing interim to remaining part of old prefix.
@@ -329,37 +343,38 @@ impl<K: Key, V> Art<K, V> {
             } else {
                 interim.set_prefix(&[]);
             }
-            new_interim.insert(interim_key, TypedNode::Interim(interim));
+            let res = new_interim.insert(interim_key, TypedNode::Interim(interim));
+            debug_assert!(res.is_none());
             unsafe {
                 ptr::write(
                     node_ptr,
                     TypedNode::Interim(Node::Size4(Box::new(new_interim))),
                 )
             };
-            return Ok(true);
-        }
-
-        let interim_ptr = unsafe { &mut *(interim as *mut Node<TypedNode<K, V>>) };
-        if let Some(next_node) = interim.get_mut(key_bytes[prefix_size]) {
-            // try to insert on the next level of tree
-            Err((next_node, key_start_offset + prefix_size + 1, key, value))
+            Ok(true)
         } else {
-            // we find interim node which should contain new KV
-            let leaf = TypedNode::Leaf(Leaf::new(key, value));
-            match interim_ptr.insert(key_bytes[prefix_size], leaf) {
-                Some(InsertError::Overflow(val)) => {
-                    let interim = unsafe { ptr::read(interim_ptr) };
-                    let mut new_interim = interim.expand();
-                    let err = new_interim.insert(key_bytes[prefix_size], val);
-                    debug_assert!(
-                        err.is_none(),
-                        "Insert failed after node expand (unexpected duplicate key)"
-                    );
-                    unsafe { ptr::write(node_ptr, TypedNode::Interim(new_interim)) }
-                    Ok(true)
+            let interim_ptr = unsafe { &mut *(interim as *mut Node<TypedNode<K, V>>) };
+            if let Some(next_node) = interim.get_mut(key_bytes[prefix_size]) {
+                // try to insert on the next level of tree
+                Err((next_node, key_start_offset + prefix_size + 1, key, value))
+            } else {
+                // we find interim node which should contain new KV
+                let leaf = TypedNode::Leaf(Leaf::new(key, value));
+                match interim_ptr.insert(key_bytes[prefix_size], leaf) {
+                    Some(InsertError::Overflow(val)) => {
+                        let interim = unsafe { ptr::read(interim_ptr) };
+                        let mut new_interim = interim.expand();
+                        let err = new_interim.insert(key_bytes[prefix_size], val);
+                        debug_assert!(
+                            err.is_none(),
+                            "Insert failed after node expand (unexpected duplicate key)"
+                        );
+                        unsafe { ptr::write(node_ptr, TypedNode::Interim(new_interim)) }
+                        Ok(true)
+                    }
+                    Some(InsertError::DuplicateKey) => panic!("Should not happen"),
+                    None => Ok(true),
                 }
-                Some(InsertError::DuplicateKey) => panic!("Should not happen"),
-                None => Ok(true),
             }
         }
     }
