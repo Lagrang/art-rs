@@ -146,15 +146,19 @@ impl<V> Node4<V> {
         None
     }
 
-    pub fn get_at(&self, i: usize) -> Option<(&V, usize)> {
-        if i < self.len {
-            unsafe { Some((&*self.values[i].as_ptr(), i + 1)) }
+    pub fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
+        let e = if i < self.len {
+            unsafe { Some(&*self.values[i].as_ptr()) }
         } else {
             None
-        }
+        };
+
+        let next_idx = if i + 1 < self.len { Some(i + 1) } else { None };
+        (e, next_idx)
     }
 }
 
+//TODO: try to remove duplicate code with const generics
 pub struct Node16<V> {
     prefix: Vec<u8>,
     len: usize,
@@ -303,12 +307,16 @@ impl<V> Node16<V> {
         None
     }
 
-    pub fn get_at(&self, i: usize) -> Option<(&V, usize)> {
-        if i < self.len {
-            unsafe { Some((&*self.values[i].as_ptr(), i + 1)) }
+    pub fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
+        let e = if i < self.len {
+            unsafe { Some(&*self.values[i].as_ptr()) }
         } else {
             None
-        }
+        };
+
+        let next_idx = if i + 1 < self.len { Some(i + 1) } else { None };
+
+        (e, next_idx)
     }
 }
 
@@ -444,25 +452,28 @@ impl<V> Node48<V> {
         None
     }
 
-    pub fn get_at(&self, index: usize) -> Option<(&V, usize)> {
-        if index < self.keys.len() && self.keys[index] > 0 {
-            let next_idx = if index + 1 < self.keys.len() {
-                self.keys[index + 1..]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, j)| if *j > 0 { Some(i) } else { None })
-                    .next()
-                    .map_or_else(|| self.keys.len(), |i| i + index + 1)
-            } else {
-                self.keys.len()
-            };
+    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
+        let e = if index < self.keys.len() && self.keys[index] > 0 {
             unsafe {
                 let val_index = self.keys[index] as usize - 1;
-                Some((&*self.values[val_index].as_ptr(), next_idx))
+                Some(&*self.values[val_index].as_ptr())
             }
         } else {
             None
-        }
+        };
+
+        let next_idx = if index + 1 < self.keys.len() {
+            self.keys[index + 1..]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, j)| if *j > 0 { Some(i) } else { None })
+                .next()
+                .map_or_else(|| None, |i| Some(i + index + 1))
+        } else {
+            None
+        };
+
+        (e, next_idx)
     }
 }
 
@@ -534,22 +545,25 @@ impl<V> Node256<V> {
         self.values[key as usize].as_mut()
     }
 
-    pub fn get_at(&self, index: usize) -> Option<(&V, usize)> {
-        if index < self.len {
-            let next_idx = if index + 1 < self.len {
-                self.values[index + 1..]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, val)| if val.is_some() { Some(i) } else { None })
-                    .next()
-                    .map_or_else(|| self.values.len(), |i| i + index + 1)
-            } else {
-                self.values.len()
-            };
-            self.values[index].as_ref().map(|v| (v, next_idx))
+    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
+        let e = if index < self.values.len() && self.values[index].is_some() {
+            self.values[index].as_ref().map(|v| v)
         } else {
             None
-        }
+        };
+
+        let next_idx = if index + 1 < self.values.len() {
+            self.values[index + 1..]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, val)| val.as_ref().map(|_| i))
+                .next()
+                .map_or_else(|| None, |i| Some(i + index + 1))
+        } else {
+            None
+        };
+
+        (e, next_idx)
     }
 
     pub fn set_prefix(&mut self, prefix: &[u8]) {
@@ -563,12 +577,15 @@ impl<V> Node256<V> {
 
 pub struct NodeIter<'a, V> {
     node: &'a BoxedNode<V>,
-    index: usize,
+    index: Option<usize>,
 }
 
 impl<'a, V> NodeIter<'a, V> {
     fn new(node: &'a BoxedNode<V>) -> Self {
-        Self { node, index: 0 }
+        Self {
+            node,
+            index: Some(0),
+        }
     }
 }
 
@@ -576,12 +593,25 @@ impl<'a, V> Iterator for NodeIter<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((val, i)) = self.node.get_at(self.index) {
-            self.index = i;
-            Some(val)
-        } else {
-            None
+        while let Some(index) = self.index {
+            match self.node.get_at(index) {
+                (Some(val), Some(next_element)) => {
+                    self.index = Some(next_element);
+                    return Some(val);
+                }
+                (Some(val), None) => {
+                    self.index = None;
+                    return Some(val);
+                }
+                (None, Some(next_element)) => {
+                    // this can happen only once per iterator: if node doesn't contain any element
+                    // at 0 position a iterator beginning.
+                    self.index = Some(next_element);
+                }
+                _ => return None,
+            }
         }
+        None
     }
 }
 
@@ -751,7 +781,7 @@ impl<V> BoxedNode<V> {
         }
     }
 
-    pub fn get_at(&self, index: usize) -> Option<(&V, usize)> {
+    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
         match self {
             BoxedNode::Size4(node) => node.get_at(index),
             BoxedNode::Size16(node) => node.get_at(index),

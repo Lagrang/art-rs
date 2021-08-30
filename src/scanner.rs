@@ -92,7 +92,8 @@ mod tests {
             let start = (u32::MAX as u64 + 1) << (shift * 8);
             let end = start + 100_000;
             for i in start..=end {
-                art.insert(ByteString::from(i), i.to_string());
+                let key = ByteString::from(i);
+                art.insert(key, i.to_string());
             }
 
             let mut len = 0;
