@@ -12,5 +12,8 @@ keywords = ["radix", "tree", "adaptive"]
 categories = ["data-structures"]
 include = ["src/", "LICENSE", "README.md", "CHANGELOG.md"]
 
+[features]
+disable_simd=[]
+
 [dev-dependencies]
 rand = "0.8.4"

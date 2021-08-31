@@ -24,22 +24,30 @@ where
     }
 
     pub(crate) fn new(node: &'a TypedNode<K, V>, range: R) -> Self {
-        match node {
-            TypedNode::Leaf(leaf) => Self {
-                node_stack: Vec::new(),
-                pending_leafs: vec![cmp::Reverse(leaf)].into(),
-                range,
-            },
-            TypedNode::Interim(interim) => Self {
-                node_stack: vec![interim.iter()],
-                pending_leafs: BinaryHeap::new(),
-                range,
-            },
-            TypedNode::Combined(interim, leaf) => Self {
-                node_stack: vec![interim.as_interim().iter()],
-                pending_leafs: vec![cmp::Reverse(leaf)].into(),
-                range,
-            },
+        let mut node = node;
+        let mut leafs = BinaryHeap::new();
+        let mut interims = Vec::new();
+        loop {
+            match node {
+                TypedNode::Leaf(leaf) => {
+                    leafs.push(cmp::Reverse(leaf));
+                    break;
+                }
+                TypedNode::Interim(interim) => {
+                    interims.push(interim.iter());
+                    break;
+                }
+                TypedNode::Combined(interim, leaf) => {
+                    node = interim;
+                    leafs.push(cmp::Reverse(leaf));
+                }
+            }
+        }
+
+        Self {
+            node_stack: interims,
+            pending_leafs: leafs,
+            range,
         }
     }
 }
@@ -194,7 +202,7 @@ mod tests {
 
         assert_eq!(
             sorted,
-            art.iter().map(|(k, v)| v.clone()).collect::<Vec<String>>()
+            art.iter().map(|(_, v)| v.clone()).collect::<Vec<String>>()
         );
 
         // for key in sorted {

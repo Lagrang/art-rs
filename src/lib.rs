@@ -378,7 +378,7 @@ impl<K: Key, V> Art<K, V> {
                 let leaf = TypedNode::Leaf(Leaf::new(key, value));
                 match interim_ptr.insert(key_bytes[prefix_size], leaf) {
                     Some(InsertError::Overflow(val)) => {
-                        let mut interim = unsafe { ptr::read(interim_ptr) };
+                        let interim = unsafe { ptr::read(interim_ptr) };
                         let mut new_interim = interim.expand();
                         let err = new_interim.insert(key_bytes[prefix_size], val);
                         debug_assert!(

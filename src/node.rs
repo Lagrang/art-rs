@@ -1,6 +1,13 @@
+use std::arch::x86_64::*;
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
 use std::{mem, ptr};
+
+pub trait Node<V> {
+    fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>>;
+    fn remove(&mut self, key: u8) -> Option<V>;
+    fn get_mut(&mut self, key: u8) -> Option<&mut V>;
+}
 
 pub struct FlatNode<V, const N: usize> {
     prefix: Vec<u8>,
@@ -19,27 +26,22 @@ impl<V, const N: usize> Drop for FlatNode<V, N> {
     }
 }
 
-impl<V, const N: usize> FlatNode<V, N> {
-    pub fn new(prefix: &[u8]) -> Self {
-        let vals: MaybeUninit<[MaybeUninit<V>; N]> = MaybeUninit::uninit();
-        Self {
-            prefix: prefix.to_vec(),
-            len: 0,
-            keys: [0; N],
-            values: unsafe { vals.assume_init() },
-        }
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn key_index_sse(key: u8, keys: __m128i, len: usize) -> Option<usize> {
+    debug_assert!(len <= 16);
+    let search_key_vec = _mm_set1_epi8(key as i8);
+    let cmp_res = _mm_cmpeq_epi8(keys, search_key_vec);
+    let zeroes_from_start = _tzcnt_u32(_mm_movemask_epi8(cmp_res) as u32) as usize;
+    if zeroes_from_start >= len {
+        None
+    } else {
+        Some(zeroes_from_start)
     }
+}
 
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
-    }
-
-    pub fn set_prefix(&mut self, prefix: &[u8]) {
-        self.prefix = prefix.to_vec();
-    }
-
-    pub fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
-        // TODO: replace binary search with SIMD seq scan
+impl<V, const N: usize> Node<V> for FlatNode<V, N> {
+    fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
         self.keys[..self.len].binary_search(&key).map_or_else(
             |i| {
                 if self.len >= N {
@@ -68,7 +70,7 @@ impl<V, const N: usize> FlatNode<V, N> {
         )
     }
 
-    pub fn remove(&mut self, key: u8) -> Option<V> {
+    fn remove(&mut self, key: u8) -> Option<V> {
         self.keys[..self.len].binary_search(&key).map_or_else(
             |_| None,
             |i| {
@@ -96,11 +98,66 @@ impl<V, const N: usize> FlatNode<V, N> {
         )
     }
 
+    fn get_mut(&mut self, key: u8) -> Option<&mut V> {
+        self.get_key_index(key)
+            .map(|i| unsafe { &mut *self.values[i].as_mut_ptr() })
+    }
+}
+
+impl<V, const N: usize> FlatNode<V, N> {
+    pub fn new(prefix: &[u8]) -> Self {
+        let vals: MaybeUninit<[MaybeUninit<V>; N]> = MaybeUninit::uninit();
+        Self {
+            prefix: prefix.to_vec(),
+            len: 0,
+            keys: [0; N],
+            values: unsafe { vals.assume_init() },
+        }
+    }
+
+    fn get_key_index(&self, key: u8) -> Option<usize> {
+        #[cfg(all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            not(feature = "disable_simd")
+        ))]
+        unsafe {
+            if N == 4 {
+                let keys = _mm_set_epi8(
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    self.keys[3] as i8,
+                    self.keys[2] as i8,
+                    self.keys[1] as i8,
+                    self.keys[0] as i8,
+                );
+                return key_index_sse(key, keys, self.len);
+            } else if N == 16 {
+                let keys = _mm_loadu_si128(self.keys.as_ptr() as *const __m128i);
+                return key_index_sse(key, keys, self.len);
+            }
+        }
+
+        self.keys[..self.len]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| if *k == key { Some(i) } else { None })
+            .next()
+    }
+
     pub fn expand<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
         debug_assert!(NEW_SIZE > self.len);
         let mut new_node = FlatNode::new(&self.prefix);
         new_node.len = self.len;
-        // TODO: use simd
         new_node.keys[..self.len].copy_from_slice(&self.keys[..self.len]);
         unsafe {
             ptr::copy_nonoverlapping(
@@ -127,30 +184,6 @@ impl<V, const N: usize> FlatNode<V, N> {
         // emulate that all values was moved out from node before drop
         self.len = 0;
         new_node
-    }
-
-    pub fn get(&self, key: u8) -> Option<&V> {
-        // TODO: use simd
-        for (i, k) in self.keys[..self.len].iter().enumerate() {
-            if *k == key {
-                unsafe {
-                    return Some(&*self.values[i].as_ptr());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_mut(&mut self, key: u8) -> Option<&mut V> {
-        // TODO: use simd
-        for (i, k) in self.keys[..self.len].iter().enumerate() {
-            if *k == key {
-                unsafe {
-                    return Some(&mut *self.values[i].as_mut_ptr());
-                }
-            }
-        }
-        None
     }
 
     pub fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
@@ -182,6 +215,78 @@ impl<V> Drop for Node48<V> {
     }
 }
 
+impl<V> Node<V> for Node48<V> {
+    fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
+        let i = key as usize;
+        if self.keys[i] != 0 {
+            return Some(InsertError::DuplicateKey);
+        }
+        if self.len >= 48 {
+            return Some(InsertError::Overflow(value));
+        }
+
+        self.values[self.len as usize] = MaybeUninit::new(value);
+        self.keys[i] = self.len as u8 + 1;
+        self.len += 1;
+        None
+    }
+
+    fn remove(&mut self, key: u8) -> Option<V> {
+        let key_idx = key as usize;
+        if self.keys[key_idx] == 0 {
+            return None;
+        }
+        let val_idx = self.keys[key_idx] as usize - 1;
+        let val =
+            unsafe { mem::replace(&mut self.values[val_idx], MaybeUninit::uninit()).assume_init() };
+        self.keys[key_idx] = 0;
+
+        #[cfg(all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            not(feature = "disable_simd")
+        ))]
+        unsafe {
+            let keys = _mm_loadu_si128(self.keys.as_ptr() as *const __m128i);
+            let res1 = key_index_sse(self.len as u8, keys, 16);
+            let keys = _mm_loadu_si128(self.keys[16..].as_ptr() as *const __m128i);
+            let res2 = key_index_sse(self.len as u8, keys, 16).map(|i| i + 16);
+            let keys = _mm_loadu_si128(self.keys[32..].as_ptr() as *const __m128i);
+            let res3 = key_index_sse(self.len as u8, keys, 16).map(|i| i + 32);
+            res1.or(res2).or(res3).map(|i| {
+                // move value of key which points to last array cell
+                self.keys[i] = val_idx as u8 + 1;
+                self.values[val_idx] =
+                    mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
+            });
+            self.len -= 1;
+            return Some(val);
+        };
+
+        for i in 0..self.keys.len() {
+            // find key which uses last cell inside values array
+            if self.keys[i] == self.len as u8 {
+                // move value of key which points to last array cell
+                self.keys[i] = val_idx as u8 + 1;
+                self.values[val_idx] =
+                    mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
+                break;
+            }
+        }
+        self.len -= 1;
+        Some(val)
+    }
+
+    fn get_mut(&mut self, key: u8) -> Option<&mut V> {
+        let i = self.keys[key as usize] as usize;
+        if i > 0 {
+            unsafe {
+                return Some(&mut *self.values[i - 1].as_mut_ptr());
+            }
+        }
+        None
+    }
+}
+
 impl<V> Node48<V> {
     pub fn new(prefix: &[u8]) -> Self {
         let vals: MaybeUninit<[MaybeUninit<V>; 48]> = MaybeUninit::uninit();
@@ -207,61 +312,14 @@ impl<V> Node48<V> {
         new_node
     }
 
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
-    }
-
-    pub fn set_prefix(&mut self, prefix: &[u8]) {
-        self.prefix = prefix.to_vec();
-    }
-
     pub fn should_shrink(&self) -> bool {
         self.len <= 16
     }
 
-    pub fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
-        let i = key as usize;
-        if self.keys[i] != 0 {
-            return Some(InsertError::DuplicateKey);
-        }
-        if self.len >= 48 {
-            return Some(InsertError::Overflow(value));
-        }
-
-        self.values[self.len as usize] = MaybeUninit::new(value);
-        self.keys[i] = self.len as u8 + 1;
-        self.len += 1;
-        None
-    }
-
-    pub fn remove(&mut self, key: u8) -> Option<V> {
-        let key_idx = key as usize;
-        if self.keys[key_idx] == 0 {
-            return None;
-        }
-        let val_idx = self.keys[key_idx] as usize - 1;
-        let val =
-            unsafe { mem::replace(&mut self.values[val_idx], MaybeUninit::uninit()).assume_init() };
-        self.keys[key_idx] = 0;
-        // TODO: replace by SIMD search
-        for i in 0..self.keys.len() {
-            // find key which uses last cell inside values array
-            if self.keys[i] == self.len as u8 {
-                // move value of key which points to last array cell
-                self.keys[i] = val_idx as u8 + 1;
-                self.values[val_idx] =
-                    mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
-                break;
-            }
-        }
-        self.len -= 1;
-        Some(val)
-    }
-
     pub fn expand(mut self) -> Node256<V> {
         let mut new_node = Node256::new(&self.prefix);
-        for (key, i) in self.keys.iter().enumerate() {
-            let val_idx = *i as usize;
+        for (key, val_loc) in self.keys.iter().enumerate() {
+            let val_idx = *val_loc as usize;
             if val_idx > 0 {
                 let val = unsafe { ptr::read(&self.values[val_idx - 1]).assume_init() };
                 let err = new_node.insert(key as u8, val);
@@ -289,26 +347,6 @@ impl<V> Node48<V> {
         // emulate that all values was moved out from node before drop
         self.len = 0;
         new_node
-    }
-
-    pub fn get(&self, key: u8) -> Option<&V> {
-        let i = self.keys[key as usize] as usize;
-        if i > 0 {
-            unsafe {
-                return Some(&*self.values[i - 1].as_ptr());
-            }
-        }
-        None
-    }
-
-    pub fn get_mut(&mut self, key: u8) -> Option<&mut V> {
-        let i = self.keys[key as usize] as usize;
-        if i > 0 {
-            unsafe {
-                return Some(&mut *self.values[i - 1].as_mut_ptr());
-            }
-        }
-        None
     }
 
     pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
@@ -342,6 +380,31 @@ pub struct Node256<V> {
     values: [Option<V>; 256],
 }
 
+impl<V> Node<V> for Node256<V> {
+    fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
+        let i = key as usize;
+        if self.values[i].is_none() {
+            self.values[i] = Some(value);
+            self.len += 1;
+            None
+        } else {
+            Some(InsertError::DuplicateKey)
+        }
+    }
+
+    fn remove(&mut self, key: u8) -> Option<V> {
+        let i = key as usize;
+        self.values[i].take().map(|v| {
+            self.len -= 1;
+            v
+        })
+    }
+
+    fn get_mut(&mut self, key: u8) -> Option<&mut V> {
+        self.values[key as usize].as_mut()
+    }
+}
+
 impl<V> Node256<V> {
     #[allow(clippy::uninit_assumed_init)]
     pub fn new(prefix: &[u8]) -> Self {
@@ -359,34 +422,11 @@ impl<V> Node256<V> {
         }
     }
 
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
-    }
-
-    pub fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
-        let i = key as usize;
-        if self.values[i].is_none() {
-            self.values[i] = Some(value);
-            self.len += 1;
-            None
-        } else {
-            Some(InsertError::DuplicateKey)
-        }
-    }
-
-    pub fn remove(&mut self, key: u8) -> Option<V> {
-        let i = key as usize;
-        mem::replace(&mut self.values[i], None).map(|v| {
-            self.len -= 1;
-            v
-        })
-    }
-
     pub fn shrink(mut self) -> Node48<V> {
         debug_assert!(self.len <= 48);
         let mut new_node = Node48::new(&self.prefix);
         for i in 0..self.values.len() {
-            if let Some(val) = mem::replace(&mut self.values[i], None) {
+            if let Some(val) = self.values[i].take() {
                 let res = new_node.insert(i as u8, val);
                 debug_assert!(res.is_none());
             }
@@ -394,14 +434,6 @@ impl<V> Node256<V> {
 
         self.len = 0;
         new_node
-    }
-
-    pub fn get(&self, key: u8) -> Option<&V> {
-        self.values[key as usize].as_ref()
-    }
-
-    pub fn get_mut(&mut self, key: u8) -> Option<&mut V> {
-        self.values[key as usize].as_mut()
     }
 
     pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
@@ -423,10 +455,6 @@ impl<V> Node256<V> {
         };
 
         (e, next_idx)
-    }
-
-    pub fn set_prefix(&mut self, prefix: &[u8]) {
-        self.prefix = prefix.to_vec();
     }
 
     pub fn should_shrink(&self) -> bool {
@@ -506,13 +534,6 @@ impl<K, V> TypedNode<K, V> {
     }
 
     pub fn as_interim_mut(&mut self) -> &mut BoxedNode<TypedNode<K, V>> {
-        match self {
-            TypedNode::Interim(node) => node,
-            _ => panic!("Only interim can be retrieved"),
-        }
-    }
-
-    pub fn as_interim(&self) -> &BoxedNode<TypedNode<K, V>> {
         match self {
             TypedNode::Interim(node) => node,
             _ => panic!("Only interim can be retrieved"),
@@ -631,15 +652,6 @@ impl<V> BoxedNode<V> {
         }
     }
 
-    pub fn get(&self, key: u8) -> Option<&V> {
-        match self {
-            BoxedNode::Size4(node) => node.get(key),
-            BoxedNode::Size16(node) => node.get(key),
-            BoxedNode::Size48(node) => node.get(key),
-            BoxedNode::Size256(node) => node.get(key),
-        }
-    }
-
     pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
         match self {
             BoxedNode::Size4(node) => node.get_at(index),
@@ -657,4 +669,60 @@ impl<V> BoxedNode<V> {
 pub enum InsertError<V> {
     DuplicateKey,
     Overflow(V),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::node::{FlatNode, InsertError, Node, Node256, Node48};
+
+    #[test]
+    fn flat_node() {
+        node_test(FlatNode::<usize, 4>::new(&[]), 4);
+        node_test(FlatNode::<usize, 16>::new(&[]), 16);
+        node_test(FlatNode::<usize, 32>::new(&[]), 32);
+        node_test(FlatNode::<usize, 48>::new(&[]), 48);
+        node_test(FlatNode::<usize, 64>::new(&[]), 64);
+    }
+
+    #[test]
+    fn node48() {
+        node_test(Node48::<usize>::new(&[]), 48);
+    }
+
+    #[test]
+    fn node256() {
+        node_test(Node256::<usize>::new(&[]), 256);
+    }
+
+    fn node_test(mut node: impl Node<usize>, size: usize) {
+        for i in 0..size {
+            assert!(node.insert(i as u8, i).is_none());
+            assert!(node.insert(i as u8, i).is_some());
+        }
+
+        if size + 1 < u8::MAX as usize {
+            assert!(matches!(
+                node.insert((size + 1) as u8, size + 1),
+                Some(InsertError::Overflow(_))
+            ));
+        } else {
+            assert!(matches!(
+                node.insert((size + 1) as u8, size + 1),
+                Some(InsertError::DuplicateKey)
+            ));
+        }
+
+        for i in 0..size {
+            assert!(matches!(node.get_mut(i as u8), Some(v) if *v == i));
+        }
+
+        if size + 1 < u8::MAX as usize {
+            assert!(matches!(node.get_mut((size + 1) as u8), None));
+        }
+
+        for i in 0..size {
+            assert!(matches!(node.remove(i as u8), Some(v) if v == i));
+        }
+        assert!(matches!(node.remove((size + 1) as u8), None));
+    }
 }
