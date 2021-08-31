@@ -48,6 +48,7 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
+        //TODO: optimize scan by skipping nodes which is not under requested range
         while let Some(node) = self.node_stack.last_mut() {
             let mut e = node.next();
             loop {
@@ -60,14 +61,13 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
                             return Some((&leaf.key, &leaf.value));
                         }
                         break;
-                        //TODO: we outside of range, think how to stop scanner
                     }
                     Some(TypedNode::Interim(interim)) => {
                         self.node_stack.push(interim.iter());
                         break;
                     }
                     Some(TypedNode::Combined(interim, leaf)) => {
-                        // next interim can also be combined node
+                        // next interim can be combined node
                         e = Some(interim);
                         if self.range.contains(&leaf.key) {
                             self.pending_leafs.push(std::cmp::Reverse(leaf));

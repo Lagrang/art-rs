@@ -1,16 +1,15 @@
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
-use std::ops::DerefMut;
 use std::{mem, ptr};
 
-pub struct Node4<V> {
+pub struct FlatNode<V, const N: usize> {
     prefix: Vec<u8>,
     len: usize,
-    keys: [u8; 4],
-    values: [MaybeUninit<V>; 4],
+    keys: [u8; N],
+    values: [MaybeUninit<V>; N],
 }
 
-impl<V> Drop for Node4<V> {
+impl<V, const N: usize> Drop for FlatNode<V, N> {
     fn drop(&mut self) {
         for value in &self.values[..self.len] {
             unsafe {
@@ -20,13 +19,13 @@ impl<V> Drop for Node4<V> {
     }
 }
 
-impl<V> Node4<V> {
+impl<V, const N: usize> FlatNode<V, N> {
     pub fn new(prefix: &[u8]) -> Self {
-        let vals: MaybeUninit<[MaybeUninit<V>; 4]> = MaybeUninit::uninit();
+        let vals: MaybeUninit<[MaybeUninit<V>; N]> = MaybeUninit::uninit();
         Self {
             prefix: prefix.to_vec(),
             len: 0,
-            keys: [0; 4],
+            keys: [0; N],
             values: unsafe { vals.assume_init() },
         }
     }
@@ -39,14 +38,11 @@ impl<V> Node4<V> {
         self.prefix = prefix.to_vec();
     }
 
-    pub fn should_shrink(&self) -> bool {
-        false
-    }
-
     pub fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
+        // TODO: replace binary search with SIMD seq scan
         self.keys[..self.len].binary_search(&key).map_or_else(
             |i| {
-                if self.len >= self.keys.len() {
+                if self.len >= N {
                     return Some(InsertError::Overflow(value));
                 }
 
@@ -100,8 +96,9 @@ impl<V> Node4<V> {
         )
     }
 
-    pub fn expand(mut self) -> Node16<V> {
-        let mut new_node = Node16::new(&self.prefix);
+    pub fn expand<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
+        debug_assert!(NEW_SIZE > self.len);
+        let mut new_node = FlatNode::new(&self.prefix);
         new_node.len = self.len;
         // TODO: use simd
         new_node.keys[..self.len].copy_from_slice(&self.keys[..self.len]);
@@ -118,160 +115,9 @@ impl<V> Node4<V> {
         new_node
     }
 
-    pub fn shrink(mut self) -> Node4<V> {
-        self
-    }
-
-    pub fn get(&self, key: u8) -> Option<&V> {
-        // TODO: use simd
-        for (i, k) in self.keys[..self.len].iter().enumerate() {
-            if *k == key {
-                unsafe {
-                    return Some(&*self.values[i].as_ptr());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_mut(&mut self, key: u8) -> Option<&mut V> {
-        // TODO: use simd
-        for (i, k) in self.keys[..self.len].iter().enumerate() {
-            if *k == key {
-                unsafe {
-                    return Some(&mut *self.values[i].as_mut_ptr());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
-        let e = if i < self.len {
-            unsafe { Some(&*self.values[i].as_ptr()) }
-        } else {
-            None
-        };
-
-        let next_idx = if i + 1 < self.len { Some(i + 1) } else { None };
-        (e, next_idx)
-    }
-}
-
-//TODO: try to remove duplicate code with const generics
-pub struct Node16<V> {
-    prefix: Vec<u8>,
-    len: usize,
-    keys: [u8; 16],
-    values: [MaybeUninit<V>; 16],
-}
-
-impl<V> Drop for Node16<V> {
-    fn drop(&mut self) {
-        for value in &self.values[..self.len] {
-            unsafe {
-                ptr::read(value.as_ptr());
-            }
-        }
-    }
-}
-
-impl<V> Node16<V> {
-    pub fn new(prefix: &[u8]) -> Self {
-        let vals: MaybeUninit<[MaybeUninit<V>; 16]> = MaybeUninit::uninit();
-        Self {
-            prefix: prefix.to_vec(),
-            len: 0,
-            keys: [0; 16],
-            values: unsafe { vals.assume_init() },
-        }
-    }
-
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
-    }
-
-    pub fn set_prefix(&mut self, prefix: &[u8]) {
-        self.prefix = prefix.to_vec();
-    }
-
-    pub fn should_shrink(&self) -> bool {
-        self.len <= 4
-    }
-
-    pub fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
-        // TODO: replace binary search with SIMD seq scan
-        self.keys[..self.len].binary_search(&key).map_or_else(
-            |i| {
-                if self.len >= self.keys.len() {
-                    return Some(InsertError::Overflow(value));
-                }
-                // shift array elements to right side to get free space for insert
-                unsafe {
-                    ptr::copy(
-                        self.keys[i..].as_ptr(),
-                        self.keys[i + 1..].as_mut_ptr(),
-                        self.len - i,
-                    );
-                    ptr::copy(
-                        self.values[i..].as_ptr(),
-                        self.values[i + 1..].as_mut_ptr(),
-                        self.len - i,
-                    );
-                }
-                self.keys[i] = key;
-                self.values[i] = MaybeUninit::new(value);
-                self.len += 1;
-                None
-            },
-            |_| Some(InsertError::DuplicateKey),
-        )
-    }
-
-    pub fn remove(&mut self, key: u8) -> Option<V> {
-        self.keys[..self.len].binary_search(&key).map_or_else(
-            |_| None,
-            |i| {
-                let val = unsafe {
-                    mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
-                };
-                self.len -= 1;
-                if self.len > 0 {
-                    // shift array elements to left side to compact value space
-                    unsafe {
-                        ptr::copy(
-                            self.keys[i + 1..].as_ptr(),
-                            self.keys[i..].as_mut_ptr(),
-                            self.len - i,
-                        );
-                        ptr::copy(
-                            self.values[i + 1..].as_ptr(),
-                            self.values[i..].as_mut_ptr(),
-                            self.len - i,
-                        );
-                    }
-                }
-                Some(val)
-            },
-        )
-    }
-
-    pub fn expand(mut self) -> Node48<V> {
-        let mut new_node = Node48::new(&self.prefix);
-        for (i, key) in self.keys[..self.len].iter().enumerate() {
-            let val = unsafe { ptr::read(&self.values[i]).assume_init() };
-            let res = new_node.insert(*key, val);
-            debug_assert!(res.is_none());
-        }
-
-        // emulate that all values was moved out from node before drop
-        self.len = 0;
-        new_node
-    }
-
-    pub fn shrink(mut self) -> Node4<V> {
-        debug_assert!(self.len <= 4);
-        let mut new_node = Node4::new(&self.prefix);
+    pub fn shrink<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
+        debug_assert!(self.len <= NEW_SIZE);
+        let mut new_node = FlatNode::new(&self.prefix);
         for (i, key) in self.keys[..self.len].iter().enumerate() {
             let val = unsafe { ptr::read(&self.values[i]).assume_init() };
             let res = new_node.insert(*key, val);
@@ -315,7 +161,6 @@ impl<V> Node16<V> {
         };
 
         let next_idx = if i + 1 < self.len { Some(i + 1) } else { None };
-
         (e, next_idx)
     }
 }
@@ -346,6 +191,20 @@ impl<V> Node48<V> {
             keys: [0; 256],
             values: unsafe { vals.assume_init() },
         }
+    }
+
+    pub fn expand_from<const N: usize>(mut node: FlatNode<V, N>) -> Node48<V> {
+        debug_assert!(node.len <= 48);
+        let mut new_node = Node48::new(&node.prefix);
+        for (i, key) in node.keys[..node.len].iter().enumerate() {
+            let val = unsafe { ptr::read(&node.values[i]).assume_init() };
+            let res = new_node.insert(*key, val);
+            debug_assert!(res.is_none());
+        }
+
+        // emulate that all values was moved out from node before drop
+        node.len = 0;
+        new_node
     }
 
     pub fn prefix(&self) -> &[u8] {
@@ -415,9 +274,9 @@ impl<V> Node48<V> {
         new_node
     }
 
-    pub fn shrink(mut self) -> Node16<V> {
+    pub fn shrink(mut self) -> FlatNode<V, 16> {
         debug_assert!(self.len <= 16);
-        let mut new_node = Node16::new(&self.prefix);
+        let mut new_node = FlatNode::new(&self.prefix);
         for (i, key) in self.keys.iter().enumerate() {
             let val_idx = *key as usize;
             if val_idx > 0 {
@@ -693,8 +552,8 @@ impl<K: Ord, V> Ord for Leaf<K, V> {
 }
 
 pub enum BoxedNode<V> {
-    Size4(Box<Node4<V>>),
-    Size16(Box<Node16<V>>),
+    Size4(Box<FlatNode<V, 4>>),
+    Size16(Box<FlatNode<V, 16>>),
     Size48(Box<Node48<V>>),
     Size256(Box<Node256<V>>),
 }
@@ -739,7 +598,7 @@ impl<V> BoxedNode<V> {
     pub fn expand(self) -> BoxedNode<V> {
         match self {
             BoxedNode::Size4(node) => BoxedNode::Size16(Box::new(node.expand())),
-            BoxedNode::Size16(node) => BoxedNode::Size48(Box::new(node.expand())),
+            BoxedNode::Size16(node) => BoxedNode::Size48(Box::new(Node48::expand_from(*node))),
             BoxedNode::Size48(node) => BoxedNode::Size256(Box::new(node.expand())),
             BoxedNode::Size256(_) => self,
         }
@@ -747,8 +606,8 @@ impl<V> BoxedNode<V> {
 
     pub fn should_shrink(&self) -> bool {
         match self {
-            BoxedNode::Size4(node) => node.should_shrink(),
-            BoxedNode::Size16(node) => node.should_shrink(),
+            BoxedNode::Size4(_) => false,
+            BoxedNode::Size16(node) => node.len <= 4,
             BoxedNode::Size48(node) => node.should_shrink(),
             BoxedNode::Size256(node) => node.should_shrink(),
         }

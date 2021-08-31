@@ -253,7 +253,7 @@ impl<K: Key, V> Art<K, V> {
 
         let new_interim = if leaf_key.is_empty() {
             // existing leaf key is shorter than new key.
-            let mut new_interim = Node4::new(prefix);
+            let mut new_interim = FlatNode::new(prefix);
             // safely move out value from node holder because
             // later we will override it without drop
             let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
@@ -269,7 +269,7 @@ impl<K: Key, V> Art<K, V> {
             // point to new key and existing leaf will be moved into new interim node.
             // in this case, key of existing leaf is always longer(length in bytes) than new
             // key(if leaf key has the same length as new key, then keys are equal).
-            let mut new_interim = Node4::new(prefix);
+            let mut new_interim = FlatNode::new(prefix);
             // safely move out value from node holder because
             // later we will override it without drop
             let existing_leaf = unsafe { ptr::read(leaf) };
@@ -284,7 +284,7 @@ impl<K: Key, V> Art<K, V> {
             // safely move out value from node holder because
             // later we will override it without drop
             let leaf = unsafe { ptr::read(leaf) };
-            let mut new_interim = Node4::new(prefix);
+            let mut new_interim = FlatNode::new(prefix);
             let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
             debug_assert!(err.is_none());
             let err = new_interim.insert(leaf_key[0], TypedNode::Leaf(leaf));
@@ -343,7 +343,7 @@ impl<K: Key, V> Art<K, V> {
             // "abc" and key is "abde", common sequence will be "ab". This sequence will be
             // used as prefix for new interim node and this interim will point to new leaf(with passed
             // KV) and previous interim(with prefix "abc").
-            let mut new_interim = Node4::new(&prefix[..prefix_size]);
+            let mut new_interim = FlatNode::new(&prefix[..prefix_size]);
             let res = new_interim.insert(
                 key_bytes[prefix_size],
                 TypedNode::Leaf(Leaf::new(key, value)),
