@@ -614,7 +614,7 @@ mod tests {
         mut test_fn: F,
     ) {
         let mut existing = HashSet::new();
-        let mut chars = ['a', 'b', 'c', 'd', 'e', 'f', 'x', 'y', 'z'];
+        let mut chars: Vec<char> = ('a'..='z').collect();
         chars.shuffle(&mut thread_rng());
         let chars = &chars[..thread_rng().gen_range(1..chars.len())];
         for i in 0..chars.len() {
@@ -622,7 +622,7 @@ mod tests {
             for i in 0..chars.len() {
                 let level2_prefix = chars[i].to_string().repeat(thread_rng().gen_range(1..8));
                 let key_prefix = level1_prefix.clone() + &level2_prefix;
-                for _ in 0..=u8::MAX {
+                for _ in 0..=2048 {
                     let suffix: String = (0..thread_rng().gen_range(0..8))
                         .map(|_| chars[thread_rng().gen_range(0..chars.len())])
                         .collect();

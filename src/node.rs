@@ -1,12 +1,14 @@
 use std::arch::x86_64::*;
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
+use std::os::unix::raw::mode_t;
 use std::{mem, ptr};
 
 pub trait Node<V> {
     fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>>;
     fn remove(&mut self, key: u8) -> Option<V>;
     fn get_mut(&mut self, key: u8) -> Option<&mut V>;
+    fn drain(self) -> Vec<(u8, V)>;
 }
 
 pub struct FlatNode<V, const N: usize> {
@@ -28,12 +30,12 @@ impl<V, const N: usize> Drop for FlatNode<V, N> {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "sse2")]
-unsafe fn key_index_sse(key: u8, keys: __m128i, len: usize) -> Option<usize> {
-    debug_assert!(len <= 16);
+unsafe fn key_index_sse(key: u8, keys_vec: __m128i, vec_len: usize) -> Option<usize> {
+    debug_assert!(vec_len <= 16);
     let search_key_vec = _mm_set1_epi8(key as i8);
-    let cmp_res = _mm_cmpeq_epi8(keys, search_key_vec);
+    let cmp_res = _mm_cmpeq_epi8(keys_vec, search_key_vec);
     let zeroes_from_start = _tzcnt_u32(_mm_movemask_epi8(cmp_res) as u32) as usize;
-    if zeroes_from_start >= len {
+    if zeroes_from_start >= vec_len {
         None
     } else {
         Some(zeroes_from_start)
@@ -102,6 +104,20 @@ impl<V, const N: usize> Node<V> for FlatNode<V, N> {
         self.get_key_index(key)
             .map(|i| unsafe { &mut *self.values[i].as_mut_ptr() })
     }
+
+    fn drain(mut self) -> Vec<(u8, V)> {
+        let mut res = Vec::new();
+        for i in 0..self.len {
+            unsafe {
+                let value = mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init();
+                res.push((self.keys[i], value));
+            }
+        }
+
+        // emulate that all values was moved out from node before drop
+        self.len = 0;
+        res
+    }
 }
 
 impl<V, const N: usize> FlatNode<V, N> {
@@ -154,8 +170,18 @@ impl<V, const N: usize> FlatNode<V, N> {
             .next()
     }
 
-    pub fn expand<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
-        debug_assert!(NEW_SIZE > self.len);
+    fn from(node: Node48<V>) -> Self {
+        debug_assert!(node.len <= N);
+        let mut new_node = FlatNode::new(&node.prefix);
+        for (k, v) in node.drain() {
+            let err = new_node.insert(k as u8, v);
+            debug_assert!(err.is_none());
+        }
+        new_node
+    }
+
+    fn resize<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
+        debug_assert!(NEW_SIZE >= self.len);
         let mut new_node = FlatNode::new(&self.prefix);
         new_node.len = self.len;
         new_node.keys[..self.len].copy_from_slice(&self.keys[..self.len]);
@@ -172,21 +198,7 @@ impl<V, const N: usize> FlatNode<V, N> {
         new_node
     }
 
-    pub fn shrink<const NEW_SIZE: usize>(mut self) -> FlatNode<V, NEW_SIZE> {
-        debug_assert!(self.len <= NEW_SIZE);
-        let mut new_node = FlatNode::new(&self.prefix);
-        for (i, key) in self.keys[..self.len].iter().enumerate() {
-            let val = unsafe { ptr::read(&self.values[i]).assume_init() };
-            let res = new_node.insert(*key, val);
-            debug_assert!(res.is_none());
-        }
-
-        // emulate that all values was moved out from node before drop
-        self.len = 0;
-        new_node
-    }
-
-    pub fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
+    fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
         let e = if i < self.len {
             unsafe { Some(&*self.values[i].as_ptr()) }
         } else {
@@ -285,10 +297,25 @@ impl<V> Node<V> for Node48<V> {
         }
         None
     }
+
+    fn drain(mut self) -> Vec<(u8, V)> {
+        let mut res = Vec::new();
+        for (k, v) in self.keys.iter().enumerate().filter(|(_, v)| **v > 0) {
+            let val_idx = *v as usize;
+            let value = unsafe {
+                mem::replace(&mut self.values[val_idx - 1], MaybeUninit::uninit()).assume_init()
+            };
+            res.push((k as u8, value));
+        }
+
+        // emulate that all values was moved out from node before drop
+        self.len = 0;
+        res
+    }
 }
 
 impl<V> Node48<V> {
-    pub fn new(prefix: &[u8]) -> Self {
+    fn new(prefix: &[u8]) -> Self {
         let vals: MaybeUninit<[MaybeUninit<V>; 48]> = MaybeUninit::uninit();
         Self {
             prefix: prefix.to_vec(),
@@ -298,58 +325,29 @@ impl<V> Node48<V> {
         }
     }
 
-    pub fn expand_from<const N: usize>(mut node: FlatNode<V, N>) -> Node48<V> {
+    fn from_node256(node: Node256<V>) -> Node48<V> {
         debug_assert!(node.len <= 48);
         let mut new_node = Node48::new(&node.prefix);
-        for (i, key) in node.keys[..node.len].iter().enumerate() {
-            let val = unsafe { ptr::read(&node.values[i]).assume_init() };
-            let res = new_node.insert(*key, val);
-            debug_assert!(res.is_none());
+        for (k, v) in node.drain() {
+            new_node.values[new_node.len as usize] = MaybeUninit::new(v);
+            new_node.keys[k as usize] = new_node.len as u8 + 1;
+            new_node.len += 1;
         }
-
-        // emulate that all values was moved out from node before drop
-        node.len = 0;
         new_node
     }
 
-    pub fn should_shrink(&self) -> bool {
-        self.len <= 16
-    }
-
-    pub fn expand(mut self) -> Node256<V> {
-        let mut new_node = Node256::new(&self.prefix);
-        for (key, val_loc) in self.keys.iter().enumerate() {
-            let val_idx = *val_loc as usize;
-            if val_idx > 0 {
-                let val = unsafe { ptr::read(&self.values[val_idx - 1]).assume_init() };
-                let err = new_node.insert(key as u8, val);
-                debug_assert!(err.is_none());
-            }
+    fn from_flat_node<const N: usize>(mut node: FlatNode<V, N>) -> Node48<V> {
+        debug_assert!(node.len <= 48);
+        let mut new_node = Node48::new(&node.prefix);
+        for (k, v) in node.drain() {
+            new_node.values[new_node.len as usize] = MaybeUninit::new(v);
+            new_node.keys[k as usize] = new_node.len as u8 + 1;
+            new_node.len += 1;
         }
-
-        // emulate that all values was moved out from node before drop
-        self.len = 0;
         new_node
     }
 
-    pub fn shrink(mut self) -> FlatNode<V, 16> {
-        debug_assert!(self.len <= 16);
-        let mut new_node = FlatNode::new(&self.prefix);
-        for (i, key) in self.keys.iter().enumerate() {
-            let val_idx = *key as usize;
-            if val_idx > 0 {
-                let val = unsafe { ptr::read(&self.values[val_idx - 1]).assume_init() };
-                let err = new_node.insert(i as u8, val);
-                debug_assert!(err.is_none());
-            }
-        }
-
-        // emulate that all values was moved out from node before drop
-        self.len = 0;
-        new_node
-    }
-
-    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
+    fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
         let e = if index < self.keys.len() && self.keys[index] > 0 {
             unsafe {
                 let val_index = self.keys[index] as usize - 1;
@@ -403,11 +401,22 @@ impl<V> Node<V> for Node256<V> {
     fn get_mut(&mut self, key: u8) -> Option<&mut V> {
         self.values[key as usize].as_mut()
     }
+
+    fn drain(mut self) -> Vec<(u8, V)> {
+        let mut res = Vec::new();
+        for i in 0..self.values.len() {
+            self.values[i].take().map(|v| res.push((i as u8, v)));
+        }
+
+        // emulate that all values was moved out from node before drop
+        self.len = 0;
+        res
+    }
 }
 
 impl<V> Node256<V> {
     #[allow(clippy::uninit_assumed_init)]
-    pub fn new(prefix: &[u8]) -> Self {
+    fn new(prefix: &[u8]) -> Self {
         let mut values: [Option<V>; 256] =
             unsafe { MaybeUninit::<[Option<V>; 256]>::uninit().assume_init() };
         for v in &mut values {
@@ -422,17 +431,13 @@ impl<V> Node256<V> {
         }
     }
 
-    pub fn shrink(mut self) -> Node48<V> {
-        debug_assert!(self.len <= 48);
-        let mut new_node = Node48::new(&self.prefix);
-        for i in 0..self.values.len() {
-            if let Some(val) = self.values[i].take() {
-                let res = new_node.insert(i as u8, val);
-                debug_assert!(res.is_none());
-            }
+    fn from(node: Node48<V>) -> Self {
+        let mut new_node = Node256::new(&node.prefix);
+        for (k, v) in node.drain() {
+            new_node.values[k as usize] = Some(v);
+            new_node.len += 1;
         }
 
-        self.len = 0;
         new_node
     }
 
@@ -455,10 +460,6 @@ impl<V> Node256<V> {
         };
 
         (e, next_idx)
-    }
-
-    pub fn should_shrink(&self) -> bool {
-        self.len <= 48
     }
 }
 
@@ -618,9 +619,9 @@ impl<V> BoxedNode<V> {
 
     pub fn expand(self) -> BoxedNode<V> {
         match self {
-            BoxedNode::Size4(node) => BoxedNode::Size16(Box::new(node.expand())),
-            BoxedNode::Size16(node) => BoxedNode::Size48(Box::new(Node48::expand_from(*node))),
-            BoxedNode::Size48(node) => BoxedNode::Size256(Box::new(node.expand())),
+            BoxedNode::Size4(node) => BoxedNode::Size16(Box::new(node.resize())),
+            BoxedNode::Size16(node) => BoxedNode::Size48(Box::new(Node48::from_flat_node(*node))),
+            BoxedNode::Size48(node) => BoxedNode::Size256(Box::new(Node256::from(*node))),
             BoxedNode::Size256(_) => self,
         }
     }
@@ -629,17 +630,17 @@ impl<V> BoxedNode<V> {
         match self {
             BoxedNode::Size4(_) => false,
             BoxedNode::Size16(node) => node.len <= 4,
-            BoxedNode::Size48(node) => node.should_shrink(),
-            BoxedNode::Size256(node) => node.should_shrink(),
+            BoxedNode::Size48(node) => node.len <= 16,
+            BoxedNode::Size256(node) => node.len <= 48,
         }
     }
 
     pub fn shrink(self) -> BoxedNode<V> {
         match self {
             BoxedNode::Size4(_) => self,
-            BoxedNode::Size16(node) => BoxedNode::Size4(Box::new(node.shrink())),
-            BoxedNode::Size48(node) => BoxedNode::Size16(Box::new(node.shrink())),
-            BoxedNode::Size256(node) => BoxedNode::Size48(Box::new(node.shrink())),
+            BoxedNode::Size16(node) => BoxedNode::Size4(Box::new(node.resize())),
+            BoxedNode::Size48(node) => BoxedNode::Size16(Box::new(FlatNode::from(*node))),
+            BoxedNode::Size256(node) => BoxedNode::Size48(Box::new(Node48::from_node256(*node))),
         }
     }
 
@@ -682,16 +683,75 @@ mod tests {
         node_test(FlatNode::<usize, 32>::new(&[]), 32);
         node_test(FlatNode::<usize, 48>::new(&[]), 48);
         node_test(FlatNode::<usize, 64>::new(&[]), 64);
+
+        // resize from 16 to 4
+        let mut node = FlatNode::<usize, 16>::new(&[]);
+        for i in 0..4 {
+            node.insert(i as u8, i);
+        }
+        let mut resized: FlatNode<usize, 4> = node.resize();
+        assert_eq!(resized.len, 4);
+        for i in 0..4 {
+            assert!(matches!(resized.get_mut(i as u8), Some(v) if *v == i));
+        }
+
+        // resize from 4 to 16
+        let mut node = FlatNode::<usize, 4>::new(&[]);
+        for i in 0..4 {
+            node.insert(i as u8, i);
+        }
+        let mut resized: FlatNode<usize, 16> = node.resize();
+        assert_eq!(resized.len, 4);
+        for i in 4..16 {
+            resized.insert(i as u8, i);
+        }
+        assert_eq!(resized.len, 16);
+        for i in 0..16 {
+            assert!(matches!(resized.get_mut(i as u8), Some(v) if *v == i));
+        }
     }
 
     #[test]
     fn node48() {
         node_test(Node48::<usize>::new(&[]), 48);
+
+        // resize from 48 to 16
+        let mut node = Node48::<usize>::new(&[]);
+        for i in 0..16 {
+            node.insert(i as u8, i);
+        }
+        let mut resized: FlatNode<usize, 16> = FlatNode::from(node);
+        assert_eq!(resized.len, 16);
+        for i in 0..16 {
+            assert!(matches!(resized.get_mut(i as u8), Some(v) if *v == i));
+        }
+
+        // resize from 48 to 4
+        let mut node = Node48::<usize>::new(&[]);
+        for i in 0..4 {
+            node.insert(i as u8, i);
+        }
+        let mut resized: FlatNode<usize, 4> = FlatNode::from(node);
+        assert_eq!(resized.len, 4);
+        for i in 0..4 {
+            assert!(matches!(resized.get_mut(i as u8), Some(v) if *v == i));
+        }
     }
 
     #[test]
     fn node256() {
         node_test(Node256::<usize>::new(&[]), 256);
+
+        // resize from 48 to 256
+        let mut node = Node48::<usize>::new(&[]);
+        for i in 0..48 {
+            node.insert(i as u8, i);
+        }
+        let mut resized = Node256::from(node);
+        assert_eq!(resized.len, 48);
+        for i in 0..48 {
+            assert!(matches!(resized.get_mut(i as u8), Some(v) if *v == i));
+        }
     }
 
     fn node_test(mut node: impl Node<usize>, size: usize) {
