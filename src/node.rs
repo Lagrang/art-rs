@@ -1,7 +1,7 @@
 use std::arch::x86_64::*;
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
-use std::os::unix::raw::mode_t;
+use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
 
 pub trait Node<V> {
@@ -44,60 +44,29 @@ unsafe fn key_index_sse(key: u8, keys_vec: __m128i, vec_len: usize) -> Option<us
 
 impl<V, const N: usize> Node<V> for FlatNode<V, N> {
     fn insert(&mut self, key: u8, value: V) -> Option<InsertError<V>> {
-        self.keys[..self.len].binary_search(&key).map_or_else(
-            |i| {
-                if self.len >= N {
-                    return Some(InsertError::Overflow(value));
-                }
-
-                // shift array elements to right side to get free space for insert
-                unsafe {
-                    ptr::copy(
-                        self.keys[i..].as_ptr(),
-                        self.keys[i + 1..].as_mut_ptr(),
-                        self.len - i,
-                    );
-                    ptr::copy(
-                        self.values[i..].as_ptr(),
-                        self.values[i + 1..].as_mut_ptr(),
-                        self.len - i,
-                    );
-                }
-                self.keys[i] = key;
-                self.values[i] = MaybeUninit::new(value);
-                self.len += 1;
-                None
-            },
-            |_| Some(InsertError::DuplicateKey),
-        )
+        if self.len >= N {
+            Some(InsertError::Overflow(value))
+        } else if self.get_mut(key).is_none() {
+            self.keys[self.len] = key;
+            self.values[self.len] = MaybeUninit::new(value);
+            self.len += 1;
+            None
+        } else {
+            Some(InsertError::DuplicateKey)
+        }
     }
 
     fn remove(&mut self, key: u8) -> Option<V> {
-        self.keys[..self.len].binary_search(&key).map_or_else(
-            |_| None,
-            |i| {
-                let val = unsafe {
-                    mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init()
-                };
-                self.len -= 1;
-                if self.len > 0 {
-                    // shift array elements to left side to compact value space
-                    unsafe {
-                        ptr::copy(
-                            self.keys[i + 1..].as_ptr(),
-                            self.keys[i..].as_mut_ptr(),
-                            self.len - i,
-                        );
-                        ptr::copy(
-                            self.values[i + 1..].as_ptr(),
-                            self.values[i..].as_mut_ptr(),
-                            self.len - i,
-                        );
-                    }
-                }
-                Some(val)
-            },
-        )
+        if let Some(i) = self.get_key_index(key) {
+            let val =
+                unsafe { mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init() };
+            self.keys[i] = self.keys[self.len - 1];
+            self.values[i] = mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
+            self.len -= 1;
+            Some(val)
+        } else {
+            None
+        }
     }
 
     fn get_mut(&mut self, key: u8) -> Option<&mut V> {
@@ -198,15 +167,14 @@ impl<V, const N: usize> FlatNode<V, N> {
         new_node
     }
 
-    fn get_at(&self, i: usize) -> (Option<&V>, Option<usize>) {
-        let e = if i < self.len {
-            unsafe { Some(&*self.values[i].as_ptr()) }
-        } else {
-            None
-        };
-
-        let next_idx = if i + 1 < self.len { Some(i + 1) } else { None };
-        (e, next_idx)
+    fn iter(&self) -> impl Iterator<Item = &V> {
+        let mut kvs: Vec<(u8, &V)> = self.keys[..self.len]
+            .iter()
+            .zip(&self.values[..self.len])
+            .map(|(k, v)| (*k, unsafe { &*v.as_ptr() }))
+            .collect();
+        kvs.sort_by_key(|(k, _)| *k);
+        kvs.into_iter().map(|(_, v)| v)
     }
 }
 
@@ -347,28 +315,16 @@ impl<V> Node48<V> {
         new_node
     }
 
-    fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
-        let e = if index < self.keys.len() && self.keys[index] > 0 {
-            unsafe {
-                let val_index = self.keys[index] as usize - 1;
-                Some(&*self.values[val_index].as_ptr())
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+        let slice = unsafe { &*slice_from_raw_parts(self.values.as_ptr(), self.values.len()) };
+        self.keys.iter().filter_map(move |k| {
+            if *k > 0 {
+                let val_index = *k as usize - 1;
+                unsafe { Some(&*(slice)[val_index].as_ptr()) }
+            } else {
+                None
             }
-        } else {
-            None
-        };
-
-        let next_idx = if index + 1 < self.keys.len() {
-            self.keys[index + 1..]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, j)| if *j > 0 { Some(i) } else { None })
-                .next()
-                .map_or_else(|| None, |i| Some(i + index + 1))
-        } else {
-            None
-        };
-
-        (e, next_idx)
+        })
     }
 }
 
@@ -441,38 +397,22 @@ impl<V> Node256<V> {
         new_node
     }
 
-    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
-        let e = if index < self.values.len() && self.values[index].is_some() {
-            self.values[index].as_ref().map(|v| v)
-        } else {
-            None
-        };
-
-        let next_idx = if index + 1 < self.values.len() {
-            self.values[index + 1..]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, val)| val.as_ref().map(|_| i))
-                .next()
-                .map_or_else(|| None, |i| Some(i + index + 1))
-        } else {
-            None
-        };
-
-        (e, next_idx)
+    fn iter(&self) -> impl Iterator<Item = &V> {
+        self.values.iter().filter_map(|v| v.as_ref())
     }
 }
 
 pub struct NodeIter<'a, V> {
-    node: &'a BoxedNode<V>,
-    index: Option<usize>,
+    node: Box<dyn Iterator<Item = &'a V> + 'a>,
 }
 
 impl<'a, V> NodeIter<'a, V> {
-    fn new(node: &'a BoxedNode<V>) -> Self {
+    fn new<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = &'a V> + 'a,
+    {
         Self {
-            node,
-            index: Some(0),
+            node: Box::new(iter),
         }
     }
 }
@@ -481,25 +421,7 @@ impl<'a, V> Iterator for NodeIter<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(index) = self.index {
-            match self.node.get_at(index) {
-                (Some(val), Some(next_element)) => {
-                    self.index = Some(next_element);
-                    return Some(val);
-                }
-                (Some(val), None) => {
-                    self.index = None;
-                    return Some(val);
-                }
-                (None, Some(next_element)) => {
-                    // this can happen only once per iterator: if node doesn't contain any element
-                    // at 0 position a iterator beginning.
-                    self.index = Some(next_element);
-                }
-                _ => return None,
-            }
-        }
-        None
+        self.node.next()
     }
 }
 
@@ -653,17 +575,13 @@ impl<V> BoxedNode<V> {
         }
     }
 
-    pub fn get_at(&self, index: usize) -> (Option<&V>, Option<usize>) {
-        match self {
-            BoxedNode::Size4(node) => node.get_at(index),
-            BoxedNode::Size16(node) => node.get_at(index),
-            BoxedNode::Size48(node) => node.get_at(index),
-            BoxedNode::Size256(node) => node.get_at(index),
-        }
-    }
-
     pub fn iter(&self) -> NodeIter<V> {
-        NodeIter::new(self)
+        match self {
+            BoxedNode::Size4(node) => NodeIter::new(node.iter()),
+            BoxedNode::Size16(node) => NodeIter::new(node.iter()),
+            BoxedNode::Size48(node) => NodeIter::new(node.iter()),
+            BoxedNode::Size256(node) => NodeIter::new(node.iter()),
+        }
     }
 }
 
