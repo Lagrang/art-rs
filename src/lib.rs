@@ -47,15 +47,18 @@ impl<K: Key, V> Art<K, V> {
             let mut offset = 0;
             let mut val = value;
             loop {
+                let node_ptr = node as *mut TypedNode<K, V>;
                 let res = match node {
                     TypedNode::Leaf(_) => {
                         Ok(Self::replace_leaf(node, key, val, &key_bytes, offset))
                     }
-                    TypedNode::Combined(interim, _) => {
-                        if key_bytes.is_empty() {
-                            // no more key bytes left for this tree level. Combined node already
-                            // contains leaf node for the same key.
+                    TypedNode::Combined(interim, leaf) => {
+                        if leaf.key == key {
                             Ok(false)
+                        } else if leaf.key > key {
+                            // new key is 'less' than any key in this level
+                            Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
+                            Ok(true)
                         } else {
                             Err((interim.as_mut(), offset, key, val))
                         }
@@ -227,6 +230,12 @@ impl<K: Key, V> Art<K, V> {
                 (node, key_bytes, key_in_parent)
             })
         }
+    }
+
+    fn replace_combined(node: &mut TypedNode<K, V>, key: K, value: V) {
+        let existing_node = unsafe { ptr::read(node) };
+        let new_node = TypedNode::Combined(Box::new(existing_node), Leaf::new(key, value));
+        unsafe { ptr::write(node, new_node) };
     }
 
     fn replace_leaf(
@@ -587,6 +596,27 @@ mod tests {
     }
 
     #[test]
+    fn existed_elements_cannot_be_inserted() {
+        let mut art = Art::new();
+        let mut existing = HashSet::new();
+        long_prefix_test(&mut art, |art, key| {
+            if existing.insert(key.clone()) {
+                assert!(
+                    art.insert(ByteString::new(key.as_bytes()), key.clone()),
+                    "{} not exist in tree, but insertion failed",
+                    key
+                );
+            } else {
+                assert!(
+                    !art.insert(ByteString::new(key.as_bytes()), key.clone()),
+                    "{} already exists but inserted again",
+                    key
+                );
+            }
+        });
+    }
+
+    #[test]
     fn remove_with_long_prefix() {
         let mut art = Art::new();
         let mut existing = HashSet::new();
@@ -622,7 +652,7 @@ mod tests {
             for i in 0..chars.len() {
                 let level2_prefix = chars[i].to_string().repeat(thread_rng().gen_range(1..8));
                 let key_prefix = level1_prefix.clone() + &level2_prefix;
-                for _ in 0..=2048 {
+                for _ in 0..=u8::MAX {
                     let suffix: String = (0..thread_rng().gen_range(0..8))
                         .map(|_| chars[thread_rng().gen_range(0..chars.len())])
                         .collect();
