@@ -278,7 +278,7 @@ mod tests {
         mut test_fn: F,
     ) {
         let mut existing = HashSet::new();
-        let mut chars = ['a', 'b', 'c', 'd', 'e', 'f', 'x', 'y', 'z'];
+        let mut chars: Vec<char> = ('a'..='z').collect();
         chars.shuffle(&mut thread_rng());
         let chars = &chars[..thread_rng().gen_range(1..chars.len())];
         for i in 0..chars.len() {

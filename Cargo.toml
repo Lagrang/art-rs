@@ -17,3 +17,12 @@ disable_simd=[]
 
 [dev-dependencies]
 rand = "0.8.4"
+criterion = "0.3.4"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "art_bench"
+path = "benches/art_bench.rs"
+harness = false

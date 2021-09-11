@@ -31,6 +31,8 @@ impl<K: Key, V> Art<K, V> {
         Self { root: None }
     }
 
+    // TODO: add upsert
+
     pub fn insert(&mut self, key: K, value: V) -> bool {
         let key_bytes = key.to_bytes();
         assert!(
