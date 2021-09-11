@@ -17,6 +17,15 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("upsert", |b| {
+        let mut tree = Art::new();
+        let mut key = 0u64;
+        b.iter(|| {
+            tree.upsert(ByteString::from(key), key);
+            key += 1;
+        })
+    });
+
     group.bench_function("remove", |b| {
         let mut tree = Art::new();
         b.iter_custom(|iters| {
