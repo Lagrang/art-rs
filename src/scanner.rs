@@ -1,6 +1,7 @@
 use crate::node::*;
 use crate::{Key, Leaf, TypedNode};
 use std::collections::VecDeque;
+use std::ops::Bound;
 use std::ops::RangeBounds;
 
 pub struct Scanner<'a, K, V, R> {
@@ -59,7 +60,6 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        //TODO: optimize scan by skipping nodes which is not under requested range
         while let Some(node) = self.interims.last_mut() {
             let mut e = node.next();
             loop {
@@ -71,7 +71,14 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
                             } else {
                                 self.leafs.push_back(leaf);
                             }
+                        } else {
+                            match self.range.end_bound() {
+                                Bound::Included(k) if &leaf.key > k => self.interims.clear(),
+                                Bound::Excluded(k) if &leaf.key >= k => self.interims.clear(),
+                                _ => {}
+                            }
                         }
+
                         if let Some(leaf) = self.leafs.pop_front() {
                             return Some((&leaf.key, &leaf.value));
                         }
@@ -82,10 +89,17 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
                         break;
                     }
                     Some(TypedNode::Combined(interim, leaf)) => {
-                        // next interim can be combined node
-                        e = Some(interim);
                         if self.range.contains(&leaf.key) {
                             self.leafs.push_back(leaf);
+                            // next interim can be combined node
+                            e = Some(interim);
+                        } else {
+                            match self.range.end_bound() {
+                                Bound::Included(k) if &leaf.key > k => self.interims.clear(),
+                                Bound::Excluded(k) if &leaf.key >= k => self.interims.clear(),
+                                _ => {}
+                            }
+                            break;
                         }
                     }
                     None => {
@@ -106,6 +120,7 @@ mod tests {
     use crate::Art;
     use rand::prelude::SliceRandom;
     use rand::{thread_rng, Rng};
+    use std::cmp;
     use std::collections::HashSet;
 
     #[test]
@@ -190,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_with_long_prefix() {
+    fn iter_with_long_prefix() {
         let mut art = Art::new();
         let mut existing = HashSet::new();
         long_prefix_test(&mut art, |art, key| {
@@ -222,6 +237,40 @@ mod tests {
             sorted,
             art.iter().map(|(_, v)| v.clone()).collect::<Vec<String>>()
         );
+    }
+
+    #[test]
+    fn range_scan_with_long_prefix() {
+        let mut art = Art::new();
+        long_prefix_test(&mut art, |art, key| {
+            art.insert(ByteString::new(key.as_bytes()), key.clone());
+        });
+
+        let keys: Vec<ByteString> = art.iter().map(|(k, _)| k.clone()).collect();
+        for _ in 0..500 {
+            let bound1 = keys.choose(&mut thread_rng()).unwrap();
+            let bound2 = keys.choose(&mut thread_rng()).unwrap();
+            let range = cmp::min(bound1, bound2)..cmp::max(bound1, bound2);
+            art.range(range.clone())
+                .map(|(k, _)| k.clone())
+                .all(|k| range.contains(&&k));
+            let range = cmp::min(bound1, bound2)..=cmp::max(bound1, bound2);
+            art.range(range.clone())
+                .map(|(k, _)| k.clone())
+                .all(|k| range.contains(&&k));
+            let range = ..cmp::max(bound1, bound2);
+            art.range(range)
+                .map(|(k, _)| k.clone())
+                .all(|k| range.contains(&&k));
+            let range = ..=cmp::max(bound1, bound2);
+            art.range(range)
+                .map(|(k, _)| k.clone())
+                .all(|k| range.contains(&&k));
+            let range = cmp::max(bound1, bound2)..;
+            art.range(range.clone())
+                .map(|(k, _)| k.clone())
+                .all(|k| range.contains(&&k));
+        }
     }
 
     fn long_prefix_test<F: FnMut(&mut Art<ByteString, String>, String)>(
