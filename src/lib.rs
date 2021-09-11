@@ -31,9 +31,15 @@ impl<K: Key, V> Art<K, V> {
         Self { root: None }
     }
 
-    // TODO: add upsert
-
     pub fn insert(&mut self, key: K, value: V) -> bool {
+        self.insert_internal(key, value, false)
+    }
+
+    pub fn upsert(&mut self, key: K, value: V) -> bool {
+        self.insert_internal(key, value, true)
+    }
+
+    fn insert_internal(&mut self, key: K, value: V, upsert: bool) -> bool {
         let key_bytes = key.to_bytes();
         assert!(
             !key_bytes.is_empty(),
@@ -51,12 +57,17 @@ impl<K: Key, V> Art<K, V> {
             loop {
                 let node_ptr = node as *mut TypedNode<K, V>;
                 let res = match node {
-                    TypedNode::Leaf(_) => {
-                        Ok(Self::replace_leaf(node, key, val, &key_bytes, offset))
-                    }
+                    TypedNode::Leaf(_) => Ok(Self::replace_leaf(
+                        node, key, val, &key_bytes, offset, upsert,
+                    )),
                     TypedNode::Combined(interim, leaf) => {
                         if leaf.key == key {
-                            Ok(false)
+                            if upsert {
+                                leaf.value = val;
+                                Ok(true)
+                            } else {
+                                Ok(false)
+                            }
                         } else if leaf.key > key {
                             // new key is 'less' than any key in this level
                             Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
@@ -246,10 +257,16 @@ impl<K: Key, V> Art<K, V> {
         value: V,
         key_bytes: &[u8],
         key_start_offset: usize,
+        upsert: bool,
     ) -> bool {
         let leaf = node.as_leaf_mut();
         if key == leaf.key {
-            return false;
+            return if upsert {
+                leaf.value = value;
+                true
+            } else {
+                false
+            };
         }
 
         let leaf_key_bytes = leaf.key.to_bytes();
@@ -598,6 +615,30 @@ mod tests {
     }
 
     #[test]
+    fn upsert() {
+        let mut art = Art::new();
+        let mut existing = HashSet::new();
+        long_prefix_test(&mut art, |art, key| {
+            if existing.insert(key.clone()) {
+                art.insert(ByteString::new(key.as_bytes()), key.clone());
+            }
+        });
+
+        for (i, key) in existing.iter().enumerate() {
+            let new_val = i.to_string();
+            assert!(
+                art.upsert(ByteString::new(key.as_bytes()), new_val.clone()),
+                "{}",
+                key
+            );
+            assert!(matches!(
+                art.get(&ByteString::new(key.as_bytes())),
+                Some(v) if v == &new_val
+            ));
+        }
+    }
+
+    #[test]
     fn existed_elements_cannot_be_inserted() {
         let mut art = Art::new();
         let mut existing = HashSet::new();
@@ -659,11 +700,13 @@ mod tests {
                         .map(|_| chars[thread_rng().gen_range(0..chars.len())])
                         .collect();
                     let string = key_prefix.clone() + &suffix;
-                    if existing.contains(&string) {
+                    if !existing.insert(string.clone()) {
                         continue;
                     }
-                    existing.insert(string.clone());
                     test_fn(art, string);
+                    if existing.len() >= 10_000 {
+                        return;
+                    }
                 }
             }
         }

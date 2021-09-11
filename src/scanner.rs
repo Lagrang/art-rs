@@ -291,11 +291,13 @@ mod tests {
                         .map(|_| chars[thread_rng().gen_range(0..chars.len())])
                         .collect();
                     let string = key_prefix.clone() + &suffix;
-                    if existing.contains(&string) {
+                    if !existing.insert(string.clone()) {
                         continue;
                     }
-                    existing.insert(string.clone());
                     test_fn(art, string);
+                    if existing.len() >= 10_000 {
+                        return;
+                    }
                 }
             }
         }
