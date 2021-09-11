@@ -173,7 +173,7 @@ impl<V, const N: usize> FlatNode<V, N> {
             .zip(&self.values[..self.len])
             .map(|(k, v)| (*k, unsafe { &*v.as_ptr() }))
             .collect();
-        kvs.sort_by_key(|(k, _)| *k);
+        kvs.sort_unstable_by_key(|(k, _)| *k);
         kvs.into_iter().map(|(_, v)| v)
     }
 }
@@ -304,7 +304,7 @@ impl<V> Node48<V> {
         new_node
     }
 
-    fn from_flat_node<const N: usize>(mut node: FlatNode<V, N>) -> Node48<V> {
+    fn from_flat_node<const N: usize>(node: FlatNode<V, N>) -> Node48<V> {
         debug_assert!(node.len <= 48);
         let mut new_node = Node48::new(&node.prefix);
         for (k, v) in node.drain() {
@@ -320,7 +320,7 @@ impl<V> Node48<V> {
         self.keys.iter().filter_map(move |k| {
             if *k > 0 {
                 let val_index = *k as usize - 1;
-                unsafe { Some(&*(slice)[val_index].as_ptr()) }
+                unsafe { Some(&*slice[val_index].as_ptr()) }
             } else {
                 None
             }

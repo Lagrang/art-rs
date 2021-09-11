@@ -1,12 +1,11 @@
 use crate::node::*;
 use crate::{Key, Leaf, TypedNode};
-use std::cmp;
-use std::collections::BinaryHeap;
+use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
 pub struct Scanner<'a, K, V, R> {
-    node_stack: Vec<NodeIter<'a, TypedNode<K, V>>>,
-    pending_leafs: BinaryHeap<cmp::Reverse<&'a Leaf<K, V>>>,
+    interims: Vec<NodeIter<'a, TypedNode<K, V>>>,
+    leafs: VecDeque<&'a Leaf<K, V>>,
     range: R,
 }
 
@@ -17,20 +16,22 @@ where
 {
     pub(crate) fn empty(range: R) -> Self {
         Self {
-            node_stack: Vec::new(),
-            pending_leafs: BinaryHeap::new(),
+            interims: Vec::new(),
+            leafs: VecDeque::new(),
             range,
         }
     }
 
     pub(crate) fn new(node: &'a TypedNode<K, V>, range: R) -> Self {
         let mut node = node;
-        let mut leafs = BinaryHeap::new();
+        let mut leafs = VecDeque::new();
         let mut interims = Vec::new();
         loop {
             match node {
                 TypedNode::Leaf(leaf) => {
-                    leafs.push(cmp::Reverse(leaf));
+                    if range.contains(&leaf.key) {
+                        leafs.push_back(leaf);
+                    }
                     break;
                 }
                 TypedNode::Interim(interim) => {
@@ -39,14 +40,16 @@ where
                 }
                 TypedNode::Combined(interim, leaf) => {
                     node = interim;
-                    leafs.push(cmp::Reverse(leaf));
+                    if range.contains(&leaf.key) {
+                        leafs.push_back(leaf);
+                    }
                 }
             }
         }
 
         Self {
-            node_stack: interims,
-            pending_leafs: leafs,
+            interims,
+            leafs,
             range,
         }
     }
@@ -57,41 +60,43 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         //TODO: optimize scan by skipping nodes which is not under requested range
-        while let Some(node) = self.node_stack.last_mut() {
+        while let Some(node) = self.interims.last_mut() {
             let mut e = node.next();
             loop {
                 match e {
                     Some(TypedNode::Leaf(leaf)) => {
                         if self.range.contains(&leaf.key) {
-                            self.pending_leafs.push(std::cmp::Reverse(leaf));
+                            if self.leafs.is_empty() {
+                                return Some((&leaf.key, &leaf.value));
+                            } else {
+                                self.leafs.push_back(leaf);
+                            }
                         }
-                        if let Some(cmp::Reverse(leaf)) = self.pending_leafs.pop() {
+                        if let Some(leaf) = self.leafs.pop_front() {
                             return Some((&leaf.key, &leaf.value));
                         }
                         break;
                     }
                     Some(TypedNode::Interim(interim)) => {
-                        self.node_stack.push(interim.iter());
+                        self.interims.push(interim.iter());
                         break;
                     }
                     Some(TypedNode::Combined(interim, leaf)) => {
                         // next interim can be combined node
                         e = Some(interim);
                         if self.range.contains(&leaf.key) {
-                            self.pending_leafs.push(std::cmp::Reverse(leaf));
+                            self.leafs.push_back(leaf);
                         }
                     }
                     None => {
-                        self.node_stack.pop().unwrap();
+                        self.interims.pop().unwrap();
                         break;
                     }
                 }
             }
         }
 
-        self.pending_leafs
-            .pop()
-            .map(|leaf| (&leaf.0.key, &leaf.0.value))
+        self.leafs.pop_front().map(|leaf| (&leaf.key, &leaf.value))
     }
 }
 
@@ -191,28 +196,32 @@ mod tests {
         long_prefix_test(&mut art, |art, key| {
             assert!(
                 art.insert(ByteString::new(key.as_bytes()), key.clone()),
-                "{}",
+                "{} already exists",
                 key
             );
-            existing.insert(key);
+            existing.insert(key.clone());
         });
 
         let mut sorted: Vec<String> = existing.iter().map(|v| v.clone()).collect();
         sorted.sort();
-
         assert_eq!(
             sorted,
             art.iter().map(|(_, v)| v.clone()).collect::<Vec<String>>()
         );
 
-        // for key in sorted {
-        //     assert!(
-        //         matches!(art.remove(&ByteString::new(key.as_bytes())), Some(val) if val == key),
-        //         "{}",
-        //         key
-        //     );
-        //     assert!(matches!(art.get(&ByteString::new(key.as_bytes())), None));
-        // }
+        sorted
+            .choose_multiple(&mut thread_rng(), sorted.len() / 4)
+            .for_each(|key| {
+                art.remove(&ByteString::new(key.as_bytes()));
+                existing.remove(key);
+            });
+
+        let mut sorted: Vec<String> = existing.iter().map(|v| v.clone()).collect();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            art.iter().map(|(_, v)| v.clone()).collect::<Vec<String>>()
+        );
     }
 
     fn long_prefix_test<F: FnMut(&mut Art<ByteString, String>, String)>(
