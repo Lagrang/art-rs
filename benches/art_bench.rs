@@ -1,14 +1,15 @@
 use art::keys::ByteString;
 use art::Art;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::SliceRandom;
 use rand::{thread_rng, Rng};
 use std::collections::HashSet;
 use std::time::Instant;
 
-pub fn criterion_benchmark(c: &mut Criterion) {
+pub fn modifications(c: &mut Criterion) {
     let mut group = c.benchmark_group("modification");
-    group.bench_function("insert", |b| {
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("seq_insert", |b| {
         let mut tree = Art::new();
         let mut key = 0u64;
         b.iter(|| {
@@ -17,12 +18,32 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("upsert", |b| {
+    group.bench_function("rand_insert", |b| {
+        let mut tree = Art::new();
+        let mut rng = thread_rng();
+        let keys = gen_keys(3, 2, 3);
+        b.iter(|| {
+            let key = &keys[rng.gen_range(0..keys.len())];
+            tree.insert(ByteString::new(key.as_bytes()), key.clone());
+        })
+    });
+
+    group.bench_function("seq_upsert", |b| {
         let mut tree = Art::new();
         let mut key = 0u64;
         b.iter(|| {
             tree.upsert(ByteString::from(key), key);
             key += 1;
+        })
+    });
+
+    group.bench_function("rand_upsert", |b| {
+        let mut tree = Art::new();
+        let mut rng = thread_rng();
+        let keys = gen_keys(3, 2, 3);
+        b.iter(|| {
+            let key = &keys[rng.gen_range(0..keys.len())];
+            tree.upsert(ByteString::new(key.as_bytes()), key.clone());
         })
     });
 
@@ -40,22 +61,44 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         })
     });
     group.finish();
+}
 
+pub fn access(c: &mut Criterion) {
     let mut group = c.benchmark_group("access");
-    group.bench_function("get", |b| {
-        let mut tree = Art::new();
-        b.iter_custom(|iters| {
-            for i in 0..iters {
+    group.throughput(Throughput::Elements(1));
+    for size in [100u64, 1000, 10_000, 100_000, 1_000_000, 5_000_000] {
+        group.bench_with_input(BenchmarkId::new("rand_get", size), &size, |b, size| {
+            let mut tree = Art::new();
+            for i in 0..*size {
                 tree.insert(ByteString::from(i), i);
             }
-            let start = Instant::now();
-            for i in 0..iters {
-                tree.get(&ByteString::from(i));
-            }
-            start.elapsed()
-        })
-    });
+            let mut rng = thread_rng();
+            b.iter(|| {
+                let key = rng.gen_range(0..*size);
+                tree.get(&ByteString::from(key));
+            })
+        });
+    }
 
+    for size in [100u64, 1000, 10_000, 100_000, 1_000_000, 5_000_000] {
+        group.bench_with_input(BenchmarkId::new("seq_get", size), &size, |b, size| {
+            let mut tree = Art::new();
+            for i in 0..*size {
+                tree.insert(ByteString::from(i), i);
+            }
+            let mut key = 0u64;
+            b.iter(|| {
+                tree.get(&ByteString::from(key));
+                key += 1;
+            })
+        });
+    }
+    group.finish();
+}
+
+pub fn iter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("iteration");
+    group.throughput(Throughput::Elements(1));
     for size in [100u64, 1000, 10_000, 100_000, 1_000_000, 5_000_000] {
         group.bench_with_input(BenchmarkId::new("iter_u64", size), &size, |b, size| {
             let mut tree = Art::new();
@@ -123,5 +166,7 @@ fn gen_keys(l1_prefix: usize, l2_prefix: usize, suffix: usize) -> Vec<String> {
     res
 }
 
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);
+criterion_group!(mods, modifications);
+criterion_group!(gets, access);
+criterion_group!(iters, iter);
+criterion_main!(mods, gets, iters);
