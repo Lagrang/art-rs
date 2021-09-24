@@ -2,8 +2,8 @@ pub mod keys;
 mod node;
 mod scanner;
 
+use crate::scanner::Scanner;
 use node::*;
-use scanner::Scanner;
 use std::ops::RangeBounds;
 use std::option::Option::Some;
 use std::{cmp, mem, ptr};
@@ -194,7 +194,7 @@ impl<K: Key, V> Art<K, V> {
         None
     }
 
-    pub fn range<'t>(&'t self, range: impl RangeBounds<K>) -> impl Iterator<Item = (&'t K, &'t V)> {
+    pub fn range(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = (&K, &V)> {
         if let Some(root) = self.root.as_ref() {
             Scanner::new(root, range)
         } else {
@@ -202,8 +202,8 @@ impl<K: Key, V> Art<K, V> {
         }
     }
 
-    pub fn iter<'t>(&'t self) -> impl Iterator<Item = (&'t K, &'t V)> {
-        return self.range(..);
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&K, &V)> {
+        self.range(..)
     }
 
     fn find_in_interim<'n, 'k>(
@@ -424,10 +424,29 @@ impl<K: Key, V> Art<K, V> {
     }
 }
 
-fn common_prefix_len(prefix: &[u8], key: &[u8]) -> usize {
+fn common_prefix_len(vec1: &[u8], vec2: &[u8]) -> usize {
     let mut len = 0;
-    for i in 0..cmp::min(prefix.len(), key.len()) {
-        if prefix[i] != key[i] {
+    let mut rem = cmp::min(vec1.len(), vec2.len());
+    // #[cfg(all(
+    //     any(target_arch = "x86", target_arch = "x86_64"),
+    //     not(feature = "disable_simd")
+    // ))]
+    // unsafe {
+    //     while rem >= 8 {
+    //         let v1 = _mm_loadu_si64(vec1[len..].as_ptr());
+    //         let v2 = _mm_loadu_si64(vec2[len..].as_ptr());
+    //         let res_mask = _mm_cmpeq_epi8(v1, v2);
+    //         let equal_elements = _tzcnt_u32(!(_mm_movemask_epi8(res_mask) as u32)) as usize;
+    //         if equal_elements < 8 {
+    //             return len + equal_elements;
+    //         }
+    //         len += 8;
+    //         rem -= 8;
+    //     }
+    // }
+
+    for i in len..len + rem {
+        if vec1[i] != vec2[i] {
             break;
         }
         len += 1;
@@ -439,6 +458,7 @@ fn common_prefix_len(prefix: &[u8], key: &[u8]) -> usize {
 mod tests {
     use crate::keys::ByteString;
     use crate::Art;
+    use rand::prelude::IteratorRandom;
     use rand::seq::SliceRandom;
     use rand::{thread_rng, Rng};
     use std::collections::HashSet;
@@ -612,6 +632,28 @@ mod tests {
             );
             assert!(matches!(art.get(&ByteString::new(key.as_bytes())), Some(val) if val == &key));
         });
+    }
+
+    #[test]
+    fn mixed_upsert_and_delete() {
+        let mut art = Art::new();
+        let mut existing = HashSet::new();
+        long_prefix_test(&mut art, |art, key| {
+            if thread_rng().gen_bool(0.3) && !existing.is_empty() {
+                let key: &String = existing.iter().choose(&mut thread_rng()).unwrap();
+                let key = key.clone();
+                art.remove(&ByteString::new(key.as_bytes())).unwrap();
+                existing.remove(&key);
+            } else {
+                art.upsert(ByteString::new(key.as_bytes()), key.clone());
+                existing.insert(key);
+            }
+        });
+
+        let res: Vec<&String> = art.iter().map(|(_, v)| v).collect();
+        let mut expected: Vec<&String> = existing.iter().collect();
+        expected.sort();
+        assert_eq!(expected, res);
     }
 
     #[test]

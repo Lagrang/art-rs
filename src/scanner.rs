@@ -1,29 +1,71 @@
 use crate::node::*;
 use crate::{Key, Leaf, TypedNode};
-use std::collections::VecDeque;
+use std::collections::{BinaryHeap, VecDeque};
 use std::ops::Bound;
 use std::ops::RangeBounds;
 
 pub struct Scanner<'a, K, V, R> {
+    forward: ScannerState<'a, K, V>,
+    last_forward_key: Option<&'a K>,
+    backward: BackwardScannerState<'a, K, V>,
+    last_backward_key: Option<&'a K>,
+    range: R,
+}
+
+struct ScannerState<'a, K, V> {
     interims: Vec<NodeIter<'a, TypedNode<K, V>>>,
     leafs: VecDeque<&'a Leaf<K, V>>,
-    range: R,
+}
+
+struct BackwardScannerState<'a, K, V> {
+    interims: Vec<NodeIter<'a, TypedNode<K, V>>>,
+    leafs: BinaryHeap<&'a Leaf<K, V>>,
 }
 
 impl<'a, K, V, R> Scanner<'a, K, V, R>
 where
-    R: RangeBounds<K>,
     K: Ord,
+    R: RangeBounds<K>,
 {
     pub(crate) fn empty(range: R) -> Self {
         Self {
-            interims: Vec::new(),
-            leafs: VecDeque::new(),
+            forward: ScannerState::empty(),
+            backward: BackwardScannerState::empty(),
+            last_forward_key: None,
+            last_backward_key: None,
             range,
         }
     }
 
-    pub(crate) fn new(node: &'a TypedNode<K, V>, range: R) -> Self {
+    pub(crate) fn new(node: &'a TypedNode<K, V>, range: R) -> Self
+    where
+        R: RangeBounds<K>,
+    {
+        Self {
+            forward: ScannerState::forward_scan(node, &range),
+            backward: BackwardScannerState::backward_scan(node, &range),
+            last_forward_key: None,
+            last_backward_key: None,
+            range,
+        }
+    }
+}
+
+impl<'a, K, V> ScannerState<'a, K, V>
+where
+    K: Ord,
+{
+    pub(crate) fn empty() -> Self {
+        Self {
+            interims: Vec::new(),
+            leafs: VecDeque::new(),
+        }
+    }
+
+    fn forward_scan<R>(node: &'a TypedNode<K, V>, range: &R) -> Self
+    where
+        R: RangeBounds<K>,
+    {
         let mut node = node;
         let mut leafs = VecDeque::new();
         let mut interims = Vec::new();
@@ -48,11 +90,109 @@ where
             }
         }
 
+        Self { interims, leafs }
+    }
+}
+
+impl<'a, K, V> BackwardScannerState<'a, K, V>
+where
+    K: Ord,
+{
+    pub(crate) fn empty() -> Self {
         Self {
-            interims,
-            leafs,
-            range,
+            interims: Vec::new(),
+            leafs: BinaryHeap::new(),
         }
+    }
+
+    fn backward_scan<R>(node: &'a TypedNode<K, V>, range: &R) -> Self
+    where
+        R: RangeBounds<K>,
+    {
+        let mut node = node;
+        let mut leafs = BinaryHeap::new();
+        let mut interims = Vec::new();
+        loop {
+            match node {
+                TypedNode::Leaf(leaf) => {
+                    if range.contains(&leaf.key) {
+                        leafs.push(leaf);
+                    }
+                    break;
+                }
+                TypedNode::Interim(interim) => {
+                    interims.push(interim.iter());
+                    break;
+                }
+                TypedNode::Combined(interim, leaf) => {
+                    node = interim;
+                    if range.contains(&leaf.key) {
+                        leafs.push(leaf);
+                    }
+                }
+            }
+        }
+
+        Self { interims, leafs }
+    }
+}
+
+impl<'a, K: 'a + Key, V, R: RangeBounds<K>> DoubleEndedIterator for Scanner<'a, K, V, R> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        'outer: while let Some(node) = self.backward.interims.last_mut() {
+            let mut e = node.next_back();
+            loop {
+                match e {
+                    Some(TypedNode::Leaf(leaf)) => {
+                        if self.range.contains(&leaf.key) {
+                            self.backward.leafs.push(leaf);
+                            break 'outer;
+                        } else {
+                            // match self.range.start_bound() {
+                            //     Bound::Included(k) if &leaf.key < k => {
+                            //         self.backward.interims.clear()
+                            //     }
+                            //     Bound::Excluded(k) if &leaf.key <= k => {
+                            //         self.backward.interims.clear()
+                            //     }
+                            //     _ => {}
+                            // }
+                        }
+                        break;
+                    }
+                    Some(TypedNode::Interim(interim)) => {
+                        self.backward.interims.push(interim.iter());
+                        break;
+                    }
+                    Some(TypedNode::Combined(interim, leaf)) => {
+                        if self.range.contains(&leaf.key) {
+                            self.backward.leafs.push(leaf);
+                        }
+                        // next interim can be combined node
+                        e = Some(interim);
+                    }
+                    None => {
+                        self.backward.interims.pop().unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.backward.leafs.pop().and_then(|leaf| {
+            self.last_backward_key = Some(&leaf.key);
+            if self
+                .last_backward_key
+                .zip(self.last_forward_key)
+                .map_or(true, |(k1, k2)| k1 > k2)
+            {
+                Some((&leaf.key, &leaf.value))
+            } else {
+                self.backward.interims.clear();
+                self.backward.leafs.clear();
+                None
+            }
+        })
     }
 }
 
@@ -60,57 +200,100 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(node) = self.interims.last_mut() {
+        while let Some(node) = self.forward.interims.last_mut() {
             let mut e = node.next();
             loop {
                 match e {
                     Some(TypedNode::Leaf(leaf)) => {
                         if self.range.contains(&leaf.key) {
-                            if self.leafs.is_empty() {
-                                return Some((&leaf.key, &leaf.value));
+                            if self.forward.leafs.is_empty() {
+                                self.last_forward_key = Some(&leaf.key);
+                                if self
+                                    .last_forward_key
+                                    .zip(self.last_backward_key)
+                                    .map_or(true, |(k1, k2)| k1 < k2)
+                                {
+                                    return Some((&leaf.key, &leaf.value));
+                                } else {
+                                    self.forward.interims.clear();
+                                    self.forward.leafs.clear();
+                                    return None;
+                                }
                             } else {
-                                self.leafs.push_back(leaf);
+                                self.forward.leafs.push_back(leaf);
                             }
                         } else {
                             match self.range.end_bound() {
-                                Bound::Included(k) if &leaf.key > k => self.interims.clear(),
-                                Bound::Excluded(k) if &leaf.key >= k => self.interims.clear(),
+                                Bound::Included(k) if &leaf.key > k => {
+                                    self.forward.interims.clear()
+                                }
+                                Bound::Excluded(k) if &leaf.key >= k => {
+                                    self.forward.interims.clear()
+                                }
                                 _ => {}
                             }
                         }
 
-                        if let Some(leaf) = self.leafs.pop_front() {
-                            return Some((&leaf.key, &leaf.value));
+                        if let Some(leaf) = self.forward.leafs.pop_front() {
+                            self.last_forward_key = Some(&leaf.key);
+                            if self
+                                .last_forward_key
+                                .zip(self.last_backward_key)
+                                .map_or(true, |(k1, k2)| k1 < k2)
+                            {
+                                return Some((&leaf.key, &leaf.value));
+                            } else {
+                                self.forward.interims.clear();
+                                self.forward.leafs.clear();
+                                return None;
+                            }
                         }
                         break;
                     }
                     Some(TypedNode::Interim(interim)) => {
-                        self.interims.push(interim.iter());
+                        self.forward.interims.push(interim.iter());
                         break;
                     }
                     Some(TypedNode::Combined(interim, leaf)) => {
                         if self.range.contains(&leaf.key) {
-                            self.leafs.push_back(leaf);
+                            self.forward.leafs.push_back(leaf);
                             // next interim can be combined node
                             e = Some(interim);
                         } else {
                             match self.range.end_bound() {
-                                Bound::Included(k) if &leaf.key > k => self.interims.clear(),
-                                Bound::Excluded(k) if &leaf.key >= k => self.interims.clear(),
+                                Bound::Included(k) if &leaf.key > k => {
+                                    self.forward.interims.clear()
+                                }
+                                Bound::Excluded(k) if &leaf.key >= k => {
+                                    self.forward.interims.clear()
+                                }
                                 _ => {}
                             }
                             break;
                         }
                     }
                     None => {
-                        self.interims.pop().unwrap();
+                        self.forward.interims.pop().unwrap();
                         break;
                     }
                 }
             }
         }
 
-        self.leafs.pop_front().map(|leaf| (&leaf.key, &leaf.value))
+        self.forward.leafs.pop_front().and_then(|leaf| {
+            self.last_forward_key = Some(&leaf.key);
+            if self
+                .last_forward_key
+                .zip(self.last_backward_key)
+                .map_or(true, |(k1, k2)| k1 < k2)
+            {
+                Some((&leaf.key, &leaf.value))
+            } else {
+                self.forward.interims.clear();
+                self.forward.leafs.clear();
+                None
+            }
+        })
     }
 }
 
@@ -214,10 +397,10 @@ mod tests {
                 "{} already exists",
                 key
             );
-            existing.insert(key.clone());
+            existing.insert(key);
         });
 
-        let mut sorted: Vec<String> = existing.iter().map(|v| v.clone()).collect();
+        let mut sorted: Vec<String> = existing.iter().cloned().collect();
         sorted.sort();
         assert_eq!(
             sorted,
@@ -231,7 +414,7 @@ mod tests {
                 existing.remove(key);
             });
 
-        let mut sorted: Vec<String> = existing.iter().map(|v| v.clone()).collect();
+        let mut sorted: Vec<String> = existing.iter().cloned().collect();
         sorted.sort();
         assert_eq!(
             sorted,
@@ -271,6 +454,66 @@ mod tests {
                 .map(|(k, _)| k.clone())
                 .all(|k| range.contains(&&k));
         }
+        // TODO: add test for range scans which starts with non-existing keys
+    }
+
+    #[test]
+    fn double_ended_iter() {
+        let mut art = Art::new();
+        let mut existing = HashSet::new();
+        long_prefix_test(&mut art, |art, key| {
+            art.insert(ByteString::new(key.as_bytes()), key.clone());
+            existing.insert(key);
+        });
+
+        let mut iter = art.iter().peekable();
+        let mut fwd = Vec::new();
+        let mut bwd = Vec::new();
+        while iter.peek().is_some() {
+            if thread_rng().gen_bool(0.5) {
+                (0..thread_rng().gen_range(1..25)).for_each(|_| {
+                    iter.next().map(|(_, v)| fwd.push(v.clone()));
+                });
+            } else {
+                (0..thread_rng().gen_range(1..25)).for_each(|_| {
+                    iter.next_back().map(|(_, v)| bwd.push(v.clone()));
+                });
+            }
+        }
+
+        let mut expected: Vec<String> = existing.iter().cloned().collect();
+        expected.sort();
+        bwd.reverse();
+        fwd.append(&mut bwd);
+        assert_eq!(expected, fwd);
+    }
+
+    #[test]
+    fn double_ended_iter_seq_keys() {
+        let mut art = Art::new();
+        for i in 0..2500u32 {
+            art.insert(ByteString::from(i), i);
+
+            let mut iter = art.iter().peekable();
+            let mut fwd = Vec::new();
+            let mut bwd = Vec::new();
+            while iter.peek().is_some() {
+                if thread_rng().gen_bool(0.5) {
+                    (0..thread_rng().gen_range(1..25)).for_each(|_| {
+                        iter.next().map(|(_, v)| fwd.push(v.clone()));
+                    });
+                } else {
+                    (0..thread_rng().gen_range(1..25)).for_each(|_| {
+                        iter.next_back().map(|(_, v)| bwd.push(v.clone()));
+                    });
+                }
+            }
+
+            let expected: Vec<u32> = (0..=i).collect();
+            bwd.reverse();
+            fwd.append(&mut bwd);
+            assert_eq!(expected, fwd);
+        }
     }
 
     fn long_prefix_test<F: FnMut(&mut Art<ByteString, String>, String)>(
@@ -295,7 +538,7 @@ mod tests {
                         continue;
                     }
                     test_fn(art, string);
-                    if existing.len() >= 10_000 {
+                    if existing.len() >= 70 {
                         return;
                     }
                 }

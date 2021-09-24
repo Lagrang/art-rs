@@ -25,6 +25,7 @@ impl<V, const N: usize> Drop for FlatNode<V, N> {
                 ptr::read(value.as_ptr());
             }
         }
+        self.len = 0;
     }
 }
 
@@ -167,7 +168,7 @@ impl<V, const N: usize> FlatNode<V, N> {
         new_node
     }
 
-    fn iter(&self) -> impl Iterator<Item = &V> {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &V> {
         let mut kvs: Vec<(u8, &V)> = self.keys[..self.len]
             .iter()
             .zip(&self.values[..self.len])
@@ -192,6 +193,7 @@ impl<V> Drop for Node48<V> {
                 ptr::read(value.as_ptr());
             }
         }
+        self.len = 0;
     }
 }
 
@@ -221,23 +223,26 @@ impl<V> Node<V> for Node48<V> {
             unsafe { mem::replace(&mut self.values[val_idx], MaybeUninit::uninit()).assume_init() };
         self.keys[key_idx] = 0;
 
+        if self.len == 1 {
+            self.len = 0;
+            return Some(val);
+        }
+
         #[cfg(all(
             any(target_arch = "x86", target_arch = "x86_64"),
             not(feature = "disable_simd")
         ))]
         unsafe {
-            let keys = _mm_loadu_si128(self.keys.as_ptr() as *const __m128i);
-            let res1 = key_index_sse(self.len as u8, keys, 16);
-            let keys = _mm_loadu_si128(self.keys[16..].as_ptr() as *const __m128i);
-            let res2 = key_index_sse(self.len as u8, keys, 16).map(|i| i + 16);
-            let keys = _mm_loadu_si128(self.keys[32..].as_ptr() as *const __m128i);
-            let res3 = key_index_sse(self.len as u8, keys, 16).map(|i| i + 32);
-            res1.or(res2).or(res3).map(|i| {
-                // move value of key which points to last array cell
-                self.keys[i] = val_idx as u8 + 1;
-                self.values[val_idx] =
-                    mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
-            });
+            for offset in (0..256).step_by(16) {
+                let keys = _mm_loadu_si128(self.keys[offset..].as_ptr() as *const __m128i);
+                if let Some(i) = key_index_sse(self.len as u8, keys, 16).map(|i| i + offset) {
+                    // move value of key which points to last array cell of values
+                    self.keys[i] = val_idx as u8 + 1;
+                    self.values[val_idx] =
+                        mem::replace(&mut self.values[self.len - 1], MaybeUninit::uninit());
+                    break;
+                }
+            }
             self.len -= 1;
             return Some(val);
         };
@@ -315,7 +320,7 @@ impl<V> Node48<V> {
         new_node
     }
 
-    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+    fn iter<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a V> + 'a {
         let slice = unsafe { &*slice_from_raw_parts(self.values.as_ptr(), self.values.len()) };
         self.keys.iter().filter_map(move |k| {
             if *k > 0 {
@@ -397,23 +402,29 @@ impl<V> Node256<V> {
         new_node
     }
 
-    fn iter(&self) -> impl Iterator<Item = &V> {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &V> {
         self.values.iter().filter_map(|v| v.as_ref())
     }
 }
 
 pub struct NodeIter<'a, V> {
-    node: Box<dyn Iterator<Item = &'a V> + 'a>,
+    node: Box<dyn DoubleEndedIterator<Item = &'a V> + 'a>,
 }
 
 impl<'a, V> NodeIter<'a, V> {
     fn new<I>(iter: I) -> Self
     where
-        I: Iterator<Item = &'a V> + 'a,
+        I: DoubleEndedIterator<Item = &'a V> + 'a,
     {
         Self {
             node: Box::new(iter),
         }
+    }
+}
+
+impl<'a, V> DoubleEndedIterator for NodeIter<'a, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.node.next_back()
     }
 }
 
