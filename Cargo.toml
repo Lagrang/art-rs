@@ -1,19 +1,16 @@
 [package]
-name = "art"
+name = "art-tree"
 version = "0.1.0"
 authors = ["Igor Skokov"]
 edition = "2018"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Lagrang/art-rs"
-documentation = "https://docs.rs/art"
-description = "The Adaptive Radix Tree for Rust"
+documentation = "https://docs.rs/art-tree"
+description = "The Adaptive Radix Tree"
 keywords = ["radix", "tree", "adaptive"]
 categories = ["data-structures"]
 include = ["src/", "LICENSE", "README.md", "CHANGELOG.md"]
-
-[features]
-disable_simd=[]
 
 [dev-dependencies]
 rand = "0.8.4"

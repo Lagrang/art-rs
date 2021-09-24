@@ -1,11 +1,42 @@
-pub mod keys;
+//! # Adaptive Radix Tree
+//! The radix tree based on ([The Adaptive Radix Tree:
+//! ARTful Indexing for Main-Memory Databases](https://15721.courses.cs.cmu.edu/spring2016/papers/leis-icde2013.pdf)).
+//!
+//! # Examples
+//! ```
+//! use art::ByteString;
+//! use art::Art;
+//!
+//! let mut art = Art::<ByteString, u16>::new();
+//! for i in 0..u8::MAX as u16 {
+//!     assert!(art.insert(ByteString::from(i), i), "{}", i);
+//!     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i));
+//! }
+//!
+//! for i in 0..u8::MAX as u16 {
+//!     art.upsert(ByteString::from(i), i + 1);
+//!     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &(i + 1)));
+//! }
+//!
+//! assert_eq!(art.range(ByteString::from(0u16)..=ByteString::from(140u16)).count(), 141);
+//! assert_eq!(art.iter().count(), u8::MAX as usize);
+//!
+//! for i in 0..u8::MAX as u16 {
+//!     assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i + 1));
+//! }
+//! ```
+
+mod keys;
 mod node;
 mod scanner;
 
 use crate::scanner::Scanner;
+pub use keys::ByteString;
 use node::*;
+use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::option::Option::Some;
+use std::rc::Rc;
 use std::{cmp, mem, ptr};
 
 /// Trait represent [Art] key.
@@ -13,11 +44,18 @@ use std::{cmp, mem, ptr};
 /// used to order keys inside tree. [Art] crate has several implementation of [Key] trait inside
 /// `keys` module.
 pub trait Key: Eq + Ord {
+    /// Converts key to byte comparable sequence. This sequence used to represent key inside
+    /// [Art] tree.
     fn to_bytes(&self) -> Vec<u8>;
 }
 
+/// Adaptive Radix Tree structure.  
+/// [Art] accept keys which can be represented as byte comparable sequence. Keys should implement
+/// [Key] trait which used to convert key to byte sequence.
 pub struct Art<K, V> {
     root: Option<TypedNode<K, V>>,
+    // to make type !Send and !Sync
+    _phantom: PhantomData<Rc<K>>,
 }
 
 impl<K: Key, V> Default for Art<K, V> {
@@ -27,16 +65,26 @@ impl<K: Key, V> Default for Art<K, V> {
 }
 
 impl<K: Key, V> Art<K, V> {
+    /// Create empty [ART] tree.
     pub fn new() -> Self {
-        Self { root: None }
+        Self {
+            root: None,
+            _phantom: PhantomData {},
+        }
     }
 
+    /// Insert key-value pair into tree.  
+    /// Return `true` if key-value successfully inserted into tree, otherwise `false` if tree
+    /// already contains same key.
     pub fn insert(&mut self, key: K, value: V) -> bool {
         self.insert_internal(key, value, false)
     }
 
-    pub fn upsert(&mut self, key: K, value: V) -> bool {
-        self.insert_internal(key, value, true)
+    /// Insert key-value pair into tree.
+    /// If key already exists in tree, existing value will be replaced, otherwise inserts new KV
+    /// into tree.
+    pub fn upsert(&mut self, key: K, value: V) {
+        self.insert_internal(key, value, true);
     }
 
     fn insert_internal(&mut self, key: K, value: V, upsert: bool) -> bool {
@@ -93,6 +141,8 @@ impl<K: Key, V> Art<K, V> {
         }
     }
 
+    /// Remove value associated with key.  
+    /// Returns `Some(V)` if key found in tree, otherwise `None`.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         if let Some(root) = &mut self.root {
             let key_bytes_vec = key.to_bytes();
@@ -154,6 +204,8 @@ impl<K: Key, V> Art<K, V> {
         }
     }
 
+    /// Get value associated with key.  
+    /// Returns `Some(V)` if key found in tree, otherwise `None`.
     pub fn get(&self, key: &K) -> Option<&V> {
         let key_vec = key.to_bytes();
         assert!(
@@ -194,6 +246,7 @@ impl<K: Key, V> Art<K, V> {
         None
     }
 
+    /// Execute tree range scan.  
     pub fn range(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = (&K, &V)> {
         if let Some(root) = self.root.as_ref() {
             Scanner::new(root, range)
@@ -202,6 +255,7 @@ impl<K: Key, V> Art<K, V> {
         }
     }
 
+    /// Returns tree iterator.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&K, &V)> {
         self.range(..)
     }
@@ -668,11 +722,7 @@ mod tests {
 
         for (i, key) in existing.iter().enumerate() {
             let new_val = i.to_string();
-            assert!(
-                art.upsert(ByteString::new(key.as_bytes()), new_val.clone()),
-                "{}",
-                key
-            );
+            art.upsert(ByteString::new(key.as_bytes()), new_val.clone());
             assert!(matches!(
                 art.get(&ByteString::new(key.as_bytes())),
                 Some(v) if v == &new_val

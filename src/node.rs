@@ -102,10 +102,7 @@ impl<V, const N: usize> FlatNode<V, N> {
     }
 
     fn get_key_index(&self, key: u8) -> Option<usize> {
-        #[cfg(all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            not(feature = "disable_simd")
-        ))]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
             if N == 4 {
                 let keys = _mm_set_epi8(
@@ -228,10 +225,7 @@ impl<V> Node<V> for Node48<V> {
             return Some(val);
         }
 
-        #[cfg(all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            not(feature = "disable_simd")
-        ))]
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
             for offset in (0..256).step_by(16) {
                 let keys = _mm_loadu_si128(self.keys[offset..].as_ptr() as *const __m128i);

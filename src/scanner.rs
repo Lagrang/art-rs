@@ -148,15 +148,15 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> DoubleEndedIterator for Scanner<'a, 
                             self.backward.leafs.push(leaf);
                             break 'outer;
                         } else {
-                            // match self.range.start_bound() {
-                            //     Bound::Included(k) if &leaf.key < k => {
-                            //         self.backward.interims.clear()
-                            //     }
-                            //     Bound::Excluded(k) if &leaf.key <= k => {
-                            //         self.backward.interims.clear()
-                            //     }
-                            //     _ => {}
-                            // }
+                            match self.range.start_bound() {
+                                Bound::Included(k) if &leaf.key < k => {
+                                    self.backward.interims.clear()
+                                }
+                                Bound::Excluded(k) if &leaf.key <= k => {
+                                    self.backward.interims.clear()
+                                }
+                                _ => {}
+                            }
                         }
                         break;
                     }
@@ -200,28 +200,14 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(node) = self.forward.interims.last_mut() {
+        'outer: while let Some(node) = self.forward.interims.last_mut() {
             let mut e = node.next();
             loop {
                 match e {
                     Some(TypedNode::Leaf(leaf)) => {
                         if self.range.contains(&leaf.key) {
-                            if self.forward.leafs.is_empty() {
-                                self.last_forward_key = Some(&leaf.key);
-                                if self
-                                    .last_forward_key
-                                    .zip(self.last_backward_key)
-                                    .map_or(true, |(k1, k2)| k1 < k2)
-                                {
-                                    return Some((&leaf.key, &leaf.value));
-                                } else {
-                                    self.forward.interims.clear();
-                                    self.forward.leafs.clear();
-                                    return None;
-                                }
-                            } else {
-                                self.forward.leafs.push_back(leaf);
-                            }
+                            self.forward.leafs.push_back(leaf);
+                            break 'outer;
                         } else {
                             match self.range.end_bound() {
                                 Bound::Included(k) if &leaf.key > k => {
@@ -234,20 +220,6 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
                             }
                         }
 
-                        if let Some(leaf) = self.forward.leafs.pop_front() {
-                            self.last_forward_key = Some(&leaf.key);
-                            if self
-                                .last_forward_key
-                                .zip(self.last_backward_key)
-                                .map_or(true, |(k1, k2)| k1 < k2)
-                            {
-                                return Some((&leaf.key, &leaf.value));
-                            } else {
-                                self.forward.interims.clear();
-                                self.forward.leafs.clear();
-                                return None;
-                            }
-                        }
                         break;
                     }
                     Some(TypedNode::Interim(interim)) => {

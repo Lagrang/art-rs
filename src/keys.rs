@@ -1,5 +1,7 @@
 use crate::Key;
 
+/// Implementation of [Key] which can represent basic primitive Rust types(`u32`, `&[u8]`, etc) as
+/// byte comparable sequence.
 #[derive(Clone, PartialOrd, Ord, Debug)]
 pub struct ByteString {
     bytes: Vec<u8>,
