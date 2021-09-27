@@ -1,5 +1,5 @@
-use art::keys::ByteString;
-use art::Art;
+use art_tree::Art;
+use art_tree::ByteString;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::SliceRandom;
 use rand::{thread_rng, Rng};

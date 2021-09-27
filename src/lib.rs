@@ -4,8 +4,8 @@
 //!
 //! # Examples
 //! ```
-//! use art::ByteString;
-//! use art::Art;
+//! use art_tree::ByteString;
+//! use art_tree::Art;
 //!
 //! let mut art = Art::<ByteString, u16>::new();
 //! for i in 0..u8::MAX as u16 {
@@ -480,26 +480,7 @@ impl<K: Key, V> Art<K, V> {
 
 fn common_prefix_len(vec1: &[u8], vec2: &[u8]) -> usize {
     let mut len = 0;
-    let mut rem = cmp::min(vec1.len(), vec2.len());
-    // #[cfg(all(
-    //     any(target_arch = "x86", target_arch = "x86_64"),
-    //     not(feature = "disable_simd")
-    // ))]
-    // unsafe {
-    //     while rem >= 8 {
-    //         let v1 = _mm_loadu_si64(vec1[len..].as_ptr());
-    //         let v2 = _mm_loadu_si64(vec2[len..].as_ptr());
-    //         let res_mask = _mm_cmpeq_epi8(v1, v2);
-    //         let equal_elements = _tzcnt_u32(!(_mm_movemask_epi8(res_mask) as u32)) as usize;
-    //         if equal_elements < 8 {
-    //             return len + equal_elements;
-    //         }
-    //         len += 8;
-    //         rem -= 8;
-    //     }
-    // }
-
-    for i in len..len + rem {
+    for i in 0..cmp::min(vec1.len(), vec2.len()) {
         if vec1[i] != vec2[i] {
             break;
         }
