@@ -39,14 +39,24 @@ pub use keys::ByteString;
 pub use keys::*;
 use node::*;
 use std::marker::PhantomData;
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use std::option::Option::Some;
 use std::rc::Rc;
 use std::{cmp, mem, ptr};
 
-/// Adaptive Radix Tree structure.  
-/// [Art] accept keys which can be represented as byte comparable sequence. Keys should implement
-/// [Key] trait which used to convert key to byte sequence.
+/// Adaptive Radix Tree.  
+///
+/// Radix tree is ordered according to key. Radix tree requires that key to be representable as
+/// comparable by sequence, e.g. key should implement [Key] trait which used to convert it to
+/// byte sequence.
+///
+/// This crate provides [Key] implementations for most commonly used data types:
+/// - unsigned integers(u8, u16, u32, u64, u128)  
+/// - signed integers(i8, i16, i32, i64, i128)  
+/// - floating point numbers through [Float32]/[Float64] types
+/// - [ByteString] for raw byte sequences. It can be used for ASCII strings(UTF-8 strings
+/// will be supported soon)  
+/// - usize
 pub struct Art<K, V> {
     root: Option<TypedNode<K, V>>,
     // to make type !Send and !Sync

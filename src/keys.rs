@@ -3,16 +3,20 @@ use std::mem;
 
 /// Trait represent [Art] key.
 /// Trait define method which convert key into byte comparable sequence. This sequence will be
-/// used to order keys inside tree. [Art] crate has several implementation of [Key] trait inside
-/// `keys` module.
+/// used to order keys inside tree.
 pub trait Key {
     /// Converts key to byte comparable sequence. This sequence used to represent key inside
     /// [Art] tree.
+    ///
+    /// ## Warning
+    /// Implementation must ensure that returned bytes vector have consistent order of bytes. E.g.
+    /// key type must have same ordering guarantees as returned byte sequence.  
+    /// For instance, if `"abc" < "def"`, then `"abc".to_bytes() < "def".to_bytes()`.
+    /// **Violation** of this rule is **undefined behaviour** and can cause `panic`.
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-/// Implementation of [Key] which can represent basic primitive Rust types(`u32`, `&[u8]`, etc) as
-/// byte comparable sequence.
+/// Implementation of [Key] which wraps bytes slice.
 #[derive(Clone, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct ByteString {
@@ -38,6 +42,12 @@ impl Eq for ByteString {}
 impl PartialEq for ByteString {
     fn eq(&self, other: &Self) -> bool {
         self.bytes == other.bytes
+    }
+}
+
+impl Key for usize {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_be_bytes().to_vec()
     }
 }
 
