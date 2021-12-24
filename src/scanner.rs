@@ -137,7 +137,7 @@ where
     }
 }
 
-impl<'a, K: 'a + Key, V, R: RangeBounds<K>> DoubleEndedIterator for Scanner<'a, K, V, R> {
+impl<'a, K: 'a + Key + Ord, V, R: RangeBounds<K>> DoubleEndedIterator for Scanner<'a, K, V, R> {
     fn next_back(&mut self) -> Option<Self::Item> {
         'outer: while let Some(node) = self.backward.interims.last_mut() {
             let mut e = node.next_back();
@@ -196,7 +196,7 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> DoubleEndedIterator for Scanner<'a, 
     }
 }
 
-impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
+impl<'a, K: 'a + Key + Ord, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -272,23 +272,44 @@ impl<'a, K: 'a + Key, V, R: RangeBounds<K>> Iterator for Scanner<'a, K, V, R> {
 #[cfg(test)]
 mod tests {
     use crate::keys::ByteString;
-    use crate::Art;
+    use crate::{Art, Float32, Float64, KeyBuilder};
     use rand::prelude::SliceRandom;
     use rand::{thread_rng, Rng};
     use std::cmp;
     use std::collections::HashSet;
 
     #[test]
-    fn seq_insert_u8() {
+    fn combined_keys() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(art.insert(key, i.to_string()), "{}", i);
+            }
+        }
+
+        let mut it = art.iter();
+        for i in 0..=u8::MAX {
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(matches!(it.next(), Some((k, val)) if &key == k && val == &i.to_string()));
+            }
+        }
+
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn seq_u8() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
         }
 
         let mut len = 0usize;
         let mut expected = 0u8;
-        for (k, v) in art.range(ByteString::from(0u8)..=ByteString::from(u8::MAX)) {
-            assert_eq!(&ByteString::from(expected), k);
+        for (k, v) in art.range(0u8..=u8::MAX) {
+            assert_eq!(&expected, k);
             assert_eq!(&expected.to_string(), v);
             expected = expected.wrapping_add(1);
             len += 1;
@@ -297,16 +318,16 @@ mod tests {
     }
 
     #[test]
-    fn seq_insert_u16() {
+    fn seq_u16() {
         let mut art = Art::new();
         for i in 0..=u16::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(art.insert(i, i.to_string()), "{}", i);
         }
 
         let mut len = 0usize;
         let mut expected = 0u16;
-        for (k, v) in art.range(ByteString::from(0u16)..=ByteString::from(u16::MAX)) {
-            assert_eq!(&ByteString::from(expected), k);
+        for (k, v) in art.range(0u16..=u16::MAX) {
+            assert_eq!(&expected, k);
             assert_eq!(&expected.to_string(), v);
             expected = expected.wrapping_add(1);
             len += 1;
@@ -321,13 +342,13 @@ mod tests {
             let start = (u16::MAX as u32 + 1) << (shift * 8);
             let end = start + 10000;
             for i in start..=end {
-                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+                assert!(art.insert(i, i.to_string()), "{}", i);
             }
 
             let mut len = 0;
             let mut expected = start;
-            for (k, v) in art.range(ByteString::from(start)..=ByteString::from(end)) {
-                assert_eq!(&ByteString::from(expected), k);
+            for (k, v) in art.range(start..=end) {
+                assert_eq!(&expected, k);
                 assert_eq!(&expected.to_string(), v);
                 expected += 1;
                 len += 1;
@@ -337,26 +358,71 @@ mod tests {
     }
 
     #[test]
+    fn range_scan_on_sequential_f32_keys() {
+        let mut all_keys = Vec::new();
+        let mut art: Art<Float32, String> = Art::new();
+        let mut next = thread_rng().gen_range(0.0..1000.0);
+        let end = next + 50.0;
+        while next < end {
+            art.insert(next.into(), next.to_string());
+            all_keys.push(next);
+            let step = thread_rng().gen_range(1.1..2.5);
+            next += step;
+        }
+
+        for _ in 0..100 {
+            let start_idx = thread_rng().gen_range(0..all_keys.len());
+            let end_idx = thread_rng().gen_range(start_idx..all_keys.len());
+            let range = Float32::from(all_keys[start_idx])..=Float32::from(all_keys[end_idx]);
+            assert_eq!(art.range(range).count(), end_idx - start_idx + 1);
+        }
+
+        assert_eq!(art.iter().count(), all_keys.len());
+    }
+
+    #[test]
     fn range_scan_on_sequential_u64_keys() {
         let mut art = Art::new();
         for shift in 0..4 {
             let start = (u32::MAX as u64 + 1) << (shift * 8);
             let end = start + 100_000;
             for i in start..=end {
-                let key = ByteString::from(i);
-                art.insert(key, i.to_string());
+                art.insert(i, i.to_string());
             }
 
             let mut len = 0;
             let mut expected = start;
-            for (k, v) in art.range(ByteString::from(start)..=ByteString::from(end)) {
-                assert_eq!(&ByteString::from(expected), k);
+            for (k, v) in art.range(start..=end) {
+                assert_eq!(&expected, k);
                 assert_eq!(&expected.to_string(), v);
                 expected += 1;
                 len += 1;
             }
             assert_eq!(len, end - start + 1);
         }
+    }
+
+    #[test]
+    fn range_scan_on_sequential_f64_keys() {
+        let mut all_keys = Vec::new();
+        let mut art: Art<Float64, String> = Art::new();
+        let mut next = thread_rng().gen_range(0.0..1000.0);
+        let end = next + 50.0;
+        while next < end {
+            art.insert(next.into(), next.to_string());
+            all_keys.push(next);
+            let step = thread_rng().gen_range(1.1..2.5);
+            next += step;
+        }
+
+        for _ in 0..100 {
+            let start_idx = thread_rng().gen_range(0..all_keys.len());
+            let end_idx = thread_rng().gen_range(start_idx..all_keys.len());
+            let range = Float64::from(all_keys[start_idx])..=Float64::from(all_keys[end_idx]);
+            assert_eq!(art.range(range).count(), end_idx - start_idx + 1);
+        }
+
+        assert_eq!(art.iter().count(), all_keys.len());
     }
 
     #[test]
@@ -464,7 +530,7 @@ mod tests {
     fn double_ended_iter_seq_keys() {
         let mut art = Art::new();
         for i in 0..2500u32 {
-            art.insert(ByteString::from(i), i);
+            art.insert(i, i);
 
             let mut iter = art.iter().peekable();
             let mut fwd = Vec::new();
