@@ -13,7 +13,7 @@ pub fn modifications(c: &mut Criterion) {
         let mut tree = Art::new();
         let mut key = 0u64;
         b.iter(|| {
-            tree.insert(ByteString::from(key), key);
+            tree.insert(key, key);
             key += 1;
         })
     });
@@ -32,7 +32,7 @@ pub fn modifications(c: &mut Criterion) {
         let mut tree = Art::new();
         let mut key = 0u64;
         b.iter(|| {
-            tree.upsert(ByteString::from(key), key);
+            tree.upsert(key, key);
             key += 1;
         })
     });
@@ -51,11 +51,11 @@ pub fn modifications(c: &mut Criterion) {
         let mut tree = Art::new();
         b.iter_custom(|iters| {
             for i in 0..iters {
-                tree.insert(ByteString::from(i), i);
+                tree.insert(i, i);
             }
             let start = Instant::now();
             for i in 0..iters {
-                tree.remove(&ByteString::from(i));
+                tree.remove(&i);
             }
             start.elapsed()
         })
@@ -70,12 +70,12 @@ pub fn access(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("rand_get", size), &size, |b, size| {
             let mut tree = Art::new();
             for i in 0..*size {
-                tree.insert(ByteString::from(i), i);
+                tree.insert(i, i);
             }
             let mut rng = thread_rng();
             b.iter(|| {
                 let key = rng.gen_range(0..*size);
-                tree.get(&ByteString::from(key));
+                tree.get(&key);
             })
         });
     }
@@ -84,11 +84,11 @@ pub fn access(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("seq_get", size), &size, |b, size| {
             let mut tree = Art::new();
             for i in 0..*size {
-                tree.insert(ByteString::from(i), i);
+                tree.insert(i, i);
             }
             let mut key = 0u64;
             b.iter(|| {
-                tree.get(&ByteString::from(key));
+                tree.get(&key);
                 key += 1;
             })
         });
@@ -103,7 +103,7 @@ pub fn iter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("iter_u64", size), &size, |b, size| {
             let mut tree = Art::new();
             for i in 0..*size {
-                tree.insert(ByteString::from(i), i);
+                tree.insert(i, i);
             }
             b.iter(|| {
                 tree.iter().count();
