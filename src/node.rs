@@ -314,7 +314,7 @@ impl<V> Node48<V> {
         new_node
     }
 
-    fn iter<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a V> + 'a {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &V> {
         let slice = unsafe { &*slice_from_raw_parts(self.values.as_ptr(), self.values.len()) };
         self.keys.iter().filter_map(move |k| {
             if *k > 0 {
@@ -360,7 +360,9 @@ impl<V> Node<V> for Node256<V> {
     fn drain(mut self) -> Vec<(u8, V)> {
         let mut res = Vec::new();
         for i in 0..self.values.len() {
-            self.values[i].take().map(|v| res.push((i as u8, v)));
+            if let Some(v) = self.values[i].take() {
+                res.push((i as u8, v))
+            }
         }
 
         // emulate that all values was moved out from node before drop

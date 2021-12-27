@@ -5,25 +5,29 @@
 //! # Examples
 //! ```
 //! use art_tree::ByteString;
+//! use art_tree::KeyBuilder;
 //! use art_tree::Art;
+//!
+//! let mut art = Art::<u16, u16>::new();
+//! for i in 0..u8::MAX as u16 {
+//!     assert!(art.insert(i, i), "{}", i);
+//!     assert!(matches!(art.get(&i), Some(val) if val == &i));
+//! }
+//! for i in 0..u8::MAX as u16 {
+//!     assert!(matches!(art.remove(&i), Some(val) if val == i));
+//! }
 //!
 //! let mut art = Art::<ByteString, u16>::new();
 //! for i in 0..u8::MAX as u16 {
-//!     assert!(art.insert(ByteString::from(i), i), "{}", i);
-//!     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i));
+//!     let key = KeyBuilder::new().append(i).append(ByteString::new("abc".to_string().as_bytes())).build();
+//!     art.upsert(key.clone(), i + 1);
+//!     assert!(matches!(art.get(&key), Some(val) if val == &(i + 1)));
 //! }
 //!
-//! for i in 0..u8::MAX as u16 {
-//!     art.upsert(ByteString::from(i), i + 1);
-//!     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &(i + 1)));
-//! }
-//!
-//! assert_eq!(art.range(ByteString::from(0u16)..=ByteString::from(140u16)).count(), 141);
+//! let from_key = KeyBuilder::new().append(16u16).append(ByteString::new("abc".to_string().as_bytes())).build();
+//! let until_key = KeyBuilder::new().append(20u16).append(ByteString::new("abc".to_string().as_bytes())).build();
+//! assert_eq!(art.range(from_key..=until_key).count(), 5);
 //! assert_eq!(art.iter().count(), u8::MAX as usize);
-//!
-//! for i in 0..u8::MAX as u16 {
-//!     assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i + 1));
-//! }
 //! ```
 
 mod keys;
@@ -32,26 +36,28 @@ mod scanner;
 
 use crate::scanner::Scanner;
 pub use keys::ByteString;
+pub use keys::*;
 use node::*;
+use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::option::Option::Some;
 use std::rc::Rc;
 use std::{cmp, mem, ptr};
 
-/// Trait represent [Art] key.
-/// Trait define method which convert key into byte comparable sequence. This sequence will be
-/// used to order keys inside tree. [Art] crate has several implementation of [Key] trait inside
-/// `keys` module.
-pub trait Key: Eq + Ord {
-    /// Converts key to byte comparable sequence. This sequence used to represent key inside
-    /// [Art] tree.
-    fn to_bytes(&self) -> Vec<u8>;
-}
-
-/// Adaptive Radix Tree structure.  
-/// [Art] accept keys which can be represented as byte comparable sequence. Keys should implement
-/// [Key] trait which used to convert key to byte sequence.
+/// Adaptive Radix Tree.  
+///
+/// Radix tree is ordered according to key. Radix tree requires that key to be representable as
+/// comparable by sequence, e.g. key should implement [Key] trait which used to convert it to
+/// byte sequence.
+///
+/// This crate provides [Key] implementations for most commonly used data types:
+/// - unsigned integers(u8, u16, u32, u64, u128)  
+/// - signed integers(i8, i16, i32, i64, i128)
+/// - usize
+/// - floating point numbers through [Float32]/[Float64] types
+/// - [ByteString] for raw byte sequences. It can be used for ASCII strings(UTF-8 strings
+/// not supported now, they require additional library to convert into comparable byte sequence).
 pub struct Art<K, V> {
     root: Option<TypedNode<K, V>>,
     // to make type !Send and !Sync
@@ -109,19 +115,26 @@ impl<K: Key, V> Art<K, V> {
                         node, key, val, &key_bytes, offset, upsert,
                     )),
                     TypedNode::Combined(interim, leaf) => {
-                        if leaf.key == key {
-                            if upsert {
-                                leaf.value = val;
-                                Ok(true)
-                            } else {
-                                Ok(false)
+                        match leaf.key.to_bytes().cmp(&key_bytes) {
+                            Ordering::Equal => {
+                                if upsert {
+                                    leaf.value = val;
+                                    Ok(true)
+                                } else {
+                                    Ok(false)
+                                }
                             }
-                        } else if leaf.key > key {
-                            // new key is 'less' than any key in this level
-                            Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
-                            Ok(true)
-                        } else {
-                            Err((interim.as_mut(), offset, key, val))
+                            Ordering::Greater => {
+                                // new key is 'less' than any key in this level
+                                Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
+                                Ok(true)
+                            }
+                            _ => Err(InsertOp {
+                                node: interim.as_mut(),
+                                key_byte_offset: offset,
+                                key,
+                                value: val,
+                            }),
                         }
                     }
                     TypedNode::Interim(_) => {
@@ -130,11 +143,11 @@ impl<K: Key, V> Art<K, V> {
                 };
                 match res {
                     Ok(is_inserted) => return is_inserted,
-                    Err((next_node, i, k, v)) => {
-                        node = next_node;
-                        offset = i;
-                        key = k;
-                        val = v;
+                    Err(op) => {
+                        node = op.node;
+                        offset = op.key_byte_offset;
+                        key = op.key;
+                        val = op.value;
                     }
                 }
             }
@@ -147,6 +160,7 @@ impl<K: Key, V> Art<K, V> {
         if let Some(root) = &mut self.root {
             let key_bytes_vec = key.to_bytes();
             let mut key_bytes = key_bytes_vec.as_slice();
+            let key_ro_buffer = key_bytes;
             let mut parent_link = 0;
             let mut parent: Option<&mut BoxedNode<TypedNode<K, V>>> = None;
             let mut node_ptr = root as *mut TypedNode<K, V>;
@@ -155,7 +169,7 @@ impl<K: Key, V> Art<K, V> {
                 match x {
                     TypedNode::Leaf(leaf) => {
                         // TODO: merge nodes if parent contains only link to child node
-                        return if key == &leaf.key {
+                        return if key_ro_buffer == leaf.key.to_bytes() {
                             if let Some(p) = parent {
                                 if p.should_shrink() {
                                     unsafe {
@@ -189,7 +203,7 @@ impl<K: Key, V> Art<K, V> {
                         }
                     }
                     TypedNode::Combined(interim, leaf) => {
-                        if key == &leaf.key {
+                        if key_ro_buffer == leaf.key.to_bytes() {
                             let leaf = unsafe { ptr::read(leaf) };
                             unsafe { ptr::write(node_ptr, *ptr::read(interim)) };
                             return Some(leaf.value);
@@ -215,10 +229,11 @@ impl<K: Key, V> Art<K, V> {
 
         let mut node = self.root.as_ref();
         let mut key_bytes = key_vec.as_slice();
+        let key_ro_buffer = key_bytes;
         while let Some(typed_node) = node {
             match typed_node {
                 TypedNode::Leaf(leaf) => {
-                    return if &leaf.key == key {
+                    return if leaf.key.to_bytes() == key_ro_buffer {
                         Some(&leaf.value)
                     } else {
                         None
@@ -235,7 +250,7 @@ impl<K: Key, V> Art<K, V> {
                     }
                 }
                 TypedNode::Combined(interim, leaf) => {
-                    if key == &leaf.key {
+                    if key_ro_buffer == leaf.key.to_bytes() {
                         return Some(&leaf.value);
                     } else {
                         node = Some(interim);
@@ -247,7 +262,10 @@ impl<K: Key, V> Art<K, V> {
     }
 
     /// Execute tree range scan.  
-    pub fn range(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = (&K, &V)> {
+    pub fn range(&self, range: impl RangeBounds<K>) -> impl DoubleEndedIterator<Item = (&K, &V)>
+    where
+        K: Ord,
+    {
         if let Some(root) = self.root.as_ref() {
             Scanner::new(root, range)
         } else {
@@ -256,7 +274,10 @@ impl<K: Key, V> Art<K, V> {
     }
 
     /// Returns tree iterator.
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&K, &V)>
+    where
+        K: Ord,
+    {
         self.range(..)
     }
 
@@ -314,7 +335,7 @@ impl<K: Key, V> Art<K, V> {
         upsert: bool,
     ) -> bool {
         let leaf = node.as_leaf_mut();
-        if key == leaf.key {
+        if key_bytes == leaf.key.to_bytes() {
             return if upsert {
                 leaf.value = value;
                 true
@@ -383,7 +404,7 @@ impl<K: Key, V> Art<K, V> {
         value: V,
         key_bytes: &[u8],
         key_start_offset: usize,
-    ) -> Result<bool, (&'n mut TypedNode<K, V>, usize, K, V)> {
+    ) -> Result<bool, InsertOp<'n, K, V>> {
         let node_ptr = node as *mut TypedNode<K, V>;
         let interim = node.as_interim_mut();
         if key_bytes.len() <= key_start_offset {
@@ -454,7 +475,12 @@ impl<K: Key, V> Art<K, V> {
             let interim_ptr = unsafe { &mut *(interim as *mut BoxedNode<TypedNode<K, V>>) };
             if let Some(next_node) = interim.get_mut(key_bytes[prefix_size]) {
                 // try to insert on the next level of tree
-                Err((next_node, key_start_offset + prefix_size + 1, key, value))
+                Err(InsertOp {
+                    node: next_node,
+                    key_byte_offset: key_start_offset + prefix_size + 1,
+                    key,
+                    value,
+                })
             } else {
                 // we find interim node which should contain new KV
                 let leaf = TypedNode::Leaf(Leaf::new(key, value));
@@ -489,24 +515,61 @@ fn common_prefix_len(vec1: &[u8], vec2: &[u8]) -> usize {
     len
 }
 
+struct InsertOp<'n, K, V> {
+    node: &'n mut TypedNode<K, V>,
+    // offset of byte in key which should be used to insert KV pair inside `node`
+    key_byte_offset: usize,
+    key: K,
+    value: V,
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::keys::ByteString;
-    use crate::Art;
+    use crate::{Art, ByteString, Float32, Float64, KeyBuilder};
     use rand::prelude::IteratorRandom;
     use rand::seq::SliceRandom;
     use rand::{thread_rng, Rng};
     use std::collections::HashSet;
 
     #[test]
-    fn seq_insert_u8() {
+    fn seq_insert_combined_key() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(art.insert(key, i.to_string()), "{}", i);
+            }
         }
 
         for i in 0..=u8::MAX {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_insert_u8() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
+        }
+
+        for i in 0..=u8::MAX {
+            assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+        }
+    }
+
+    #[test]
+    fn seq_insert_i8() {
+        let mut art = Art::new();
+        for i in i8::MIN..=i8::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
+        }
+
+        for i in i8::MIN..=i8::MAX {
+            assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
         }
     }
 
@@ -514,11 +577,23 @@ mod tests {
     fn seq_insert_u16() {
         let mut art = Art::new();
         for i in 0..=u16::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(art.insert(i, i.to_string()), "{}", i);
         }
 
         for i in 0..=u16::MAX {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+        }
+    }
+
+    #[test]
+    fn seq_insert_i16() {
+        let mut art = Art::new();
+        for i in i16::MIN..=i16::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
+        }
+
+        for i in i16::MIN..=i16::MAX {
+            assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
         }
     }
 
@@ -529,14 +604,146 @@ mod tests {
             let start = (u16::MAX as u32 + 1) << (shift * 8);
             let end = start + 10000;
             for i in start..=end {
-                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+                assert!(art.insert(i, i.to_string()), "{}", i);
             }
             for i in start..=end {
-                assert!(
-                    matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string())
-                );
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
             }
         }
+    }
+
+    #[test]
+    fn seq_insert_i32() {
+        let mut art = Art::new();
+        for shift in 0..2 {
+            let start = i32::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+
+        for shift in 0..2 {
+            let start = (i16::MAX as i32 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_insert_f32() {
+        let mut art: Art<Float32, String> = Art::new();
+        assert!(
+            art.insert(f32::MIN.into(), f32::MIN.to_string()),
+            "{}",
+            f32::MIN
+        );
+        assert!(matches!(art.get(&f32::MIN.into()), Some(val) if val == &f32::MIN.to_string()));
+        assert!(
+            art.insert(f32::MAX.into(), f32::MAX.to_string()),
+            "{}",
+            f32::MAX
+        );
+        assert!(matches!(art.get(&f32::MAX.into()), Some(val) if val == &f32::MAX.to_string()));
+        assert!(art.insert(0.0.into(), 0.to_string()), "{}", 0);
+        assert!(matches!(art.get(&0.0.into()), Some(val) if val == &0.to_string()));
+        assert!(
+            art.insert(Float32::from(-1.0000001), 0.to_string()),
+            "{}",
+            0
+        );
+        assert!(
+            matches!(art.get(&Float32::from(-1.0000001)), Some(val) if val == &0.to_string
+            ())
+        );
+
+        assert!(
+            art.insert(f32::NAN.into(), f32::NAN.to_string()),
+            "{}",
+            f32::NAN
+        );
+        assert!(matches!(art.get(&f32::NAN.into()), Some(val) if val == &f32::NAN.to_string()));
+
+        assert!(
+            art.insert(f32::NEG_INFINITY.into(), f32::NEG_INFINITY.to_string()),
+            "{}",
+            f32::NEG_INFINITY
+        );
+        assert!(
+            matches!(art.get(&f32::NEG_INFINITY.into()), Some(val) if val == &f32::NEG_INFINITY.to_string())
+        );
+
+        assert!(
+            art.insert(f32::INFINITY.into(), f32::INFINITY.to_string()),
+            "{}",
+            f32::INFINITY
+        );
+        assert!(
+            matches!(art.get(&f32::INFINITY.into()), Some(val) if val == &f32::INFINITY.to_string())
+        );
+    }
+
+    #[test]
+    fn seq_insert_f64() {
+        let mut art: Art<Float64, String> = Art::new();
+        assert!(
+            art.insert(f64::MIN.into(), f64::MIN.to_string()),
+            "{}",
+            f64::MIN
+        );
+        assert!(matches!(art.get(&f64::MIN.into()), Some(val) if val == &f64::MIN.to_string()));
+        assert!(
+            art.insert(f64::MAX.into(), f64::MAX.to_string()),
+            "{}",
+            f64::MAX
+        );
+        assert!(matches!(art.get(&f64::MAX.into()), Some(val) if val == &f64::MAX.to_string()));
+        assert!(art.insert(0.0.into(), 0.to_string()), "{}", 0);
+        assert!(matches!(art.get(&0.0.into()), Some(val) if val == &0.to_string()));
+        assert!(
+            art.insert(Float64::from(-1.00000012), 0.to_string()),
+            "{}",
+            0
+        );
+        assert!(
+            matches!(art.get(&Float64::from(-1.00000012)), Some(val) if val == &0.to_string
+            ())
+        );
+
+        assert!(
+            art.insert(f64::NAN.into(), f64::NAN.to_string()),
+            "{}",
+            f64::NAN
+        );
+        assert!(matches!(art.get(&f64::NAN.into()), Some(val) if val == &f64::NAN.to_string()));
+
+        assert!(
+            art.insert(f64::NEG_INFINITY.into(), f64::NEG_INFINITY.to_string()),
+            "{}",
+            f64::NEG_INFINITY
+        );
+        assert!(
+            matches!(art.get(&f64::NEG_INFINITY.into()), Some(val) if val == &f64::NEG_INFINITY.to_string())
+        );
+
+        assert!(
+            art.insert(f64::INFINITY.into(), f64::INFINITY.to_string()),
+            "{}",
+            f64::INFINITY
+        );
+        assert!(
+            matches!(art.get(&f64::INFINITY.into()), Some(val) if val == &f64::INFINITY.to_string())
+        );
     }
 
     #[test]
@@ -546,12 +753,100 @@ mod tests {
             let start = (u32::MAX as u64 + 1) << (shift * 8);
             let end = start + 100_000;
             for i in start..=end {
-                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+                assert!(art.insert(i, i.to_string()), "{}", i);
             }
             for i in start..=end {
-                assert!(
-                    matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string())
-                );
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_insert_i64() {
+        let mut art = Art::new();
+        for shift in 0..4 {
+            let start = i64::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+
+        for shift in 0..4 {
+            let start = (i32::MAX as i64 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_insert_u128() {
+        let mut art = Art::new();
+        for shift in 0..8 {
+            let start = (u64::MAX as u128 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_insert_i128() {
+        let mut art = Art::new();
+        for shift in 0..8 {
+            let start = i128::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+
+        for shift in 0..8 {
+            let start = (i64::MAX as i128 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.get(&i), Some(val) if val == &i.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_combined_key() {
+        let mut art = Art::new();
+        for i in 0..=u8::MAX {
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(art.insert(key, i.to_string()), "{}", i);
+            }
+        }
+
+        for i in 0..=u8::MAX {
+            for j in i8::MIN..=i8::MAX {
+                let key = KeyBuilder::new().append(i).append(j).build();
+                assert!(matches!(art.remove(&key), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&key), None));
             }
         }
     }
@@ -560,12 +855,25 @@ mod tests {
     fn seq_remove_u8() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(art.insert(i, i.to_string()), "{}", i);
         }
 
         for i in 0..=u8::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
-            assert!(matches!(art.get(&ByteString::from(i)), None));
+            assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&i), None));
+        }
+    }
+
+    #[test]
+    fn seq_remove_i8() {
+        let mut art = Art::new();
+        for i in i8::MIN..=i8::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
+        }
+
+        for i in i8::MIN..=i8::MAX {
+            assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&i), None));
         }
     }
 
@@ -573,12 +881,25 @@ mod tests {
     fn seq_remove_u16() {
         let mut art = Art::new();
         for i in 0..=u16::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+            assert!(art.insert(i, i.to_string()), "{}", i);
         }
 
         for i in 0..=u16::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
-            assert!(matches!(art.get(&ByteString::from(i)), None));
+            assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&i), None));
+        }
+    }
+
+    #[test]
+    fn seq_remove_i16() {
+        let mut art = Art::new();
+        for i in i16::MIN..=i16::MAX {
+            assert!(art.insert(i, i.to_string()), "{}", i);
+        }
+
+        for i in i16::MIN..=i16::MAX {
+            assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+            assert!(matches!(art.get(&i), None));
         }
     }
 
@@ -589,13 +910,42 @@ mod tests {
             let start = (u16::MAX as u32 + 1) << (shift * 8);
             let end = start + 10000;
             for i in start..=end {
-                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+                assert!(art.insert(i, i.to_string()), "{}", i);
             }
             for i in start..=end {
-                assert!(
-                    matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string())
-                );
-                assert!(matches!(art.get(&ByteString::from(i)), None));
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_i32() {
+        let mut art = Art::new();
+        for shift in 0..2 {
+            let start = i32::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+        assert!(matches!(art.remove(&0), Some(val) if val == 0.to_string()));
+
+        for shift in 0..2 {
+            let start = (i16::MAX as i32 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
             }
         }
     }
@@ -607,13 +957,88 @@ mod tests {
             let start = (u32::MAX as u64 + 1) << (shift * 8);
             let end = start + 100_000;
             for i in start..=end {
-                assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
+                assert!(art.insert(i, i.to_string()), "{}", i);
             }
             for i in start..=end {
-                assert!(
-                    matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string())
-                );
-                assert!(matches!(art.get(&ByteString::from(i)), None));
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_i64() {
+        let mut art = Art::new();
+        for shift in 0..4 {
+            let start = i64::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+        assert!(matches!(art.remove(&0), Some(val) if val == 0.to_string()));
+
+        for shift in 0..4 {
+            let start = (i32::MAX as i64 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_u128() {
+        let mut art = Art::new();
+        for shift in 0..8 {
+            let start = (u64::MAX as u128 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+    }
+
+    #[test]
+    fn seq_remove_i128() {
+        let mut art = Art::new();
+        for shift in 0..8 {
+            let start = i128::MIN >> (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
+            }
+        }
+
+        assert!(art.insert(0, "0".to_string()), "{}", 0);
+
+        for shift in 0..8 {
+            let start = (i64::MAX as i128 + 1) << (shift * 8);
+            let end = start + 10000;
+            for i in start..=end {
+                assert!(art.insert(i, i.to_string()), "{}", i);
+            }
+            for i in start..=end {
+                assert!(matches!(art.remove(&i), Some(val) if val == i.to_string()));
+                assert!(matches!(art.get(&i), None));
             }
         }
     }
@@ -622,37 +1047,46 @@ mod tests {
     fn modifications_with_seq_keys_with_increasing_size() {
         let mut art = Art::new();
         for i in 0..=u8::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(art.insert(key.clone(), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
         for i in 0..=u8::MAX {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
 
         for i in u8::MAX as u16 + 1..=u16::MAX {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(art.insert(key.clone(), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
         for i in u8::MAX as u16 + 1..=u16::MAX {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
 
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
-            assert!(art.insert(ByteString::from(i), i.to_string()), "{}", i);
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(art.insert(key.clone(), i.to_string()), "{}", i);
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
-            assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.get(&key), Some(val) if val == &i.to_string()));
         }
 
         for i in 0..=u8::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.remove(&key), Some(val) if val == i.to_string()));
         }
         for i in u8::MAX as u16 + 1..=u16::MAX {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.remove(&key), Some(val) if val == i.to_string()));
         }
         for i in u16::MAX as u32 + 1..=(1 << 21) as u32 {
-            assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i.to_string()));
+            let key = KeyBuilder::new().append(i).build();
+            assert!(matches!(art.remove(&key), Some(val) if val == i.to_string()));
         }
     }
 
