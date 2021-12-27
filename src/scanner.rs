@@ -378,6 +378,21 @@ mod tests {
         }
 
         assert_eq!(art.iter().count(), all_keys.len());
+
+        let mut art: Art<Float32, String> = Art::new();
+        art.insert(f32::NEG_INFINITY.into(), f32::NEG_INFINITY.to_string());
+        art.insert(f32::MIN.into(), f32::MIN.to_string());
+        art.insert(f32::MIN_POSITIVE.into(), f32::MIN_POSITIVE.to_string());
+        art.insert(f32::MAX.into(), f32::MAX.to_string());
+        art.insert(f32::INFINITY.into(), f32::INFINITY.to_string());
+        art.insert(f32::NAN.into(), f32::NAN.to_string());
+        let mut iter = art.iter();
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::MIN.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::NEG_INFINITY.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::MIN_POSITIVE.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::MAX.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::INFINITY.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f32::NAN.to_string()));
     }
 
     #[test]
@@ -423,6 +438,21 @@ mod tests {
         }
 
         assert_eq!(art.iter().count(), all_keys.len());
+
+        let mut art: Art<Float64, String> = Art::new();
+        art.insert(f64::NEG_INFINITY.into(), f64::NEG_INFINITY.to_string());
+        art.insert(f64::MIN.into(), f64::MIN.to_string());
+        art.insert(f64::MIN_POSITIVE.into(), f64::MIN_POSITIVE.to_string());
+        art.insert(f64::MAX.into(), f64::MAX.to_string());
+        art.insert(f64::INFINITY.into(), f64::INFINITY.to_string());
+        art.insert(f64::NAN.into(), f64::NAN.to_string());
+        let mut iter = art.iter();
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::MIN.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::NEG_INFINITY.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::MIN_POSITIVE.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::MAX.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::INFINITY.to_string()));
+        assert!(matches!(iter.next(), Some((_, val)) if val == &f64::NAN.to_string()));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! # Examples
 //! ```
 //! use art_tree::ByteString;
+//! use art_tree::KeyBuilder;
 //! use art_tree::Art;
 //!
 //! let mut art = Art::<u16, u16>::new();
@@ -12,22 +13,21 @@
 //!     assert!(art.insert(i, i), "{}", i);
 //!     assert!(matches!(art.get(&i), Some(val) if val == &i));
 //! }
+//! for i in 0..u8::MAX as u16 {
+//!     assert!(matches!(art.remove(&i), Some(val) if val == i));
+//! }
 //!
 //! let mut art = Art::<ByteString, u16>::new();
 //! for i in 0..u8::MAX as u16 {
-//!     let key = KeyBuilder::new().append(i).append("abc".to_string()).build();
-//!     art.upsert(key, i + 1);
-//!     assert!(matches!(art.get(&ByteString::from(i)), Some(val) if val == &(i + 1)));
+//!     let key = KeyBuilder::new().append(i).append(ByteString::new("abc".to_string().as_bytes())).build();
+//!     art.upsert(key.clone(), i + 1);
+//!     assert!(matches!(art.get(&key), Some(val) if val == &(i + 1)));
 //! }
 //!
-//! let from_key = KeyBuilder::new().append(16u16).append("abc".to_string()).build();
-//! let until_key = KeyBuilder::new().append(140u16).append("abc".to_string()).build();
-//! assert_eq!(art.range(ByteString::from(from_key)..=ByteString::from(until_key)).count(), 141);
+//! let from_key = KeyBuilder::new().append(16u16).append(ByteString::new("abc".to_string().as_bytes())).build();
+//! let until_key = KeyBuilder::new().append(20u16).append(ByteString::new("abc".to_string().as_bytes())).build();
+//! assert_eq!(art.range(from_key..=until_key).count(), 5);
 //! assert_eq!(art.iter().count(), u8::MAX as usize);
-//!
-//! for i in 0..u8::MAX as u16 {
-//!     assert!(matches!(art.remove(&ByteString::from(i)), Some(val) if val == i + 1));
-//! }
 //! ```
 
 mod keys;
@@ -52,11 +52,11 @@ use std::{cmp, mem, ptr};
 ///
 /// This crate provides [Key] implementations for most commonly used data types:
 /// - unsigned integers(u8, u16, u32, u64, u128)  
-/// - signed integers(i8, i16, i32, i64, i128)  
+/// - signed integers(i8, i16, i32, i64, i128)
+/// - usize
 /// - floating point numbers through [Float32]/[Float64] types
 /// - [ByteString] for raw byte sequences. It can be used for ASCII strings(UTF-8 strings
-/// will be supported soon)  
-/// - usize
+/// not supported now, they require additional library to convert into comparable byte sequence).
 pub struct Art<K, V> {
     root: Option<TypedNode<K, V>>,
     // to make type !Send and !Sync
@@ -645,6 +645,31 @@ mod tests {
             matches!(art.get(&Float32::from(-1.0000001)), Some(val) if val == &0.to_string
             ())
         );
+
+        assert!(
+            art.insert(f32::NAN.into(), f32::NAN.to_string()),
+            "{}",
+            f32::NAN
+        );
+        assert!(matches!(art.get(&f32::NAN.into()), Some(val) if val == &f32::NAN.to_string()));
+
+        assert!(
+            art.insert(f32::NEG_INFINITY.into(), f32::NEG_INFINITY.to_string()),
+            "{}",
+            f32::NEG_INFINITY
+        );
+        assert!(
+            matches!(art.get(&f32::NEG_INFINITY.into()), Some(val) if val == &f32::NEG_INFINITY.to_string())
+        );
+
+        assert!(
+            art.insert(f32::INFINITY.into(), f32::INFINITY.to_string()),
+            "{}",
+            f32::INFINITY
+        );
+        assert!(
+            matches!(art.get(&f32::INFINITY.into()), Some(val) if val == &f32::INFINITY.to_string())
+        );
     }
 
     #[test]
@@ -672,6 +697,31 @@ mod tests {
         assert!(
             matches!(art.get(&Float64::from(-1.00000012)), Some(val) if val == &0.to_string
             ())
+        );
+
+        assert!(
+            art.insert(f64::NAN.into(), f64::NAN.to_string()),
+            "{}",
+            f64::NAN
+        );
+        assert!(matches!(art.get(&f64::NAN.into()), Some(val) if val == &f64::NAN.to_string()));
+
+        assert!(
+            art.insert(f64::NEG_INFINITY.into(), f64::NEG_INFINITY.to_string()),
+            "{}",
+            f64::NEG_INFINITY
+        );
+        assert!(
+            matches!(art.get(&f64::NEG_INFINITY.into()), Some(val) if val == &f64::NEG_INFINITY.to_string())
+        );
+
+        assert!(
+            art.insert(f64::INFINITY.into(), f64::INFINITY.to_string()),
+            "{}",
+            f64::INFINITY
+        );
+        assert!(
+            matches!(art.get(&f64::INFINITY.into()), Some(val) if val == &f64::INFINITY.to_string())
         );
     }
 

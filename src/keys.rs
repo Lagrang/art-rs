@@ -16,7 +16,8 @@ pub trait Key {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-/// Implementation of [Key] which wraps bytes slice.
+/// Implementation of [Key] which wraps bytes slice. It can be used to represent strings as
+/// comparable byte sequence.
 #[derive(Clone, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct ByteString {
@@ -172,7 +173,6 @@ impl PartialOrd<Float32> for Float32 {
 
 impl From<f32> for Float32 {
     fn from(v: f32) -> Self {
-        assert!(v.is_normal());
         let v: u32 = v.to_bits();
         let xor = 1 << 31;
         let i = (v ^ xor) & xor;
@@ -211,7 +211,6 @@ impl PartialOrd<Float64> for Float64 {
 
 impl From<f64> for Float64 {
     fn from(v: f64) -> Self {
-        assert!(v.is_normal());
         let v: u64 = v.to_bits();
         let xor = 1 << 63;
         let i = (v ^ xor) & xor;
@@ -244,11 +243,13 @@ impl Key for Float64 {
 /// tree key.
 /// ```
 /// use art_tree::Art;
+/// use art_tree::KeyBuilder;
+/// use art_tree::ByteString;
 ///
 /// struct MyStruct(u8, String, u32, Box<f64>);
 ///
 /// let mut art = Art::new();
-/// let key = KeyBuilder::new().append(1).append("abc".to_string()).build();
+/// let key = KeyBuilder::new().append(1).append(ByteString::new("abc".to_string().as_bytes())).build();
 /// let val = MyStruct(1, "abc".to_string(), 200, Box::new(0.1));
 /// assert!(art.insert(key.clone(), val));
 /// assert!(art.get(&key).is_some());
