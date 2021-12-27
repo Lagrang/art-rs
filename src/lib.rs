@@ -38,6 +38,7 @@ use crate::scanner::Scanner;
 pub use keys::ByteString;
 pub use keys::*;
 use node::*;
+use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::option::Option::Some;
@@ -114,19 +115,26 @@ impl<K: Key, V> Art<K, V> {
                         node, key, val, &key_bytes, offset, upsert,
                     )),
                     TypedNode::Combined(interim, leaf) => {
-                        if leaf.key.to_bytes() == key_bytes {
-                            if upsert {
-                                leaf.value = val;
-                                Ok(true)
-                            } else {
-                                Ok(false)
+                        match leaf.key.to_bytes().cmp(&key_bytes) {
+                            Ordering::Equal => {
+                                if upsert {
+                                    leaf.value = val;
+                                    Ok(true)
+                                } else {
+                                    Ok(false)
+                                }
                             }
-                        } else if leaf.key.to_bytes() > key_bytes {
-                            // new key is 'less' than any key in this level
-                            Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
-                            Ok(true)
-                        } else {
-                            Err((interim.as_mut(), offset, key, val))
+                            Ordering::Greater => {
+                                // new key is 'less' than any key in this level
+                                Self::replace_combined(unsafe { &mut *node_ptr }, key, val);
+                                Ok(true)
+                            }
+                            _ => Err(InsertOp {
+                                node: interim.as_mut(),
+                                key_byte_offset: offset,
+                                key,
+                                value: val,
+                            }),
                         }
                     }
                     TypedNode::Interim(_) => {
@@ -135,11 +143,11 @@ impl<K: Key, V> Art<K, V> {
                 };
                 match res {
                     Ok(is_inserted) => return is_inserted,
-                    Err((next_node, i, k, v)) => {
-                        node = next_node;
-                        offset = i;
-                        key = k;
-                        val = v;
+                    Err(op) => {
+                        node = op.node;
+                        offset = op.key_byte_offset;
+                        key = op.key;
+                        val = op.value;
                     }
                 }
             }
@@ -195,7 +203,7 @@ impl<K: Key, V> Art<K, V> {
                         }
                     }
                     TypedNode::Combined(interim, leaf) => {
-                        if key_ro_buffer == &leaf.key.to_bytes() {
+                        if key_ro_buffer == leaf.key.to_bytes() {
                             let leaf = unsafe { ptr::read(leaf) };
                             unsafe { ptr::write(node_ptr, *ptr::read(interim)) };
                             return Some(leaf.value);
@@ -396,7 +404,7 @@ impl<K: Key, V> Art<K, V> {
         value: V,
         key_bytes: &[u8],
         key_start_offset: usize,
-    ) -> Result<bool, (&'n mut TypedNode<K, V>, usize, K, V)> {
+    ) -> Result<bool, InsertOp<'n, K, V>> {
         let node_ptr = node as *mut TypedNode<K, V>;
         let interim = node.as_interim_mut();
         if key_bytes.len() <= key_start_offset {
@@ -467,7 +475,12 @@ impl<K: Key, V> Art<K, V> {
             let interim_ptr = unsafe { &mut *(interim as *mut BoxedNode<TypedNode<K, V>>) };
             if let Some(next_node) = interim.get_mut(key_bytes[prefix_size]) {
                 // try to insert on the next level of tree
-                Err((next_node, key_start_offset + prefix_size + 1, key, value))
+                Err(InsertOp {
+                    node: next_node,
+                    key_byte_offset: key_start_offset + prefix_size + 1,
+                    key,
+                    value,
+                })
             } else {
                 // we find interim node which should contain new KV
                 let leaf = TypedNode::Leaf(Leaf::new(key, value));
@@ -500,6 +513,14 @@ fn common_prefix_len(vec1: &[u8], vec2: &[u8]) -> usize {
         len += 1;
     }
     len
+}
+
+struct InsertOp<'n, K, V> {
+    node: &'n mut TypedNode<K, V>,
+    // offset of byte in key which should be used to insert KV pair inside `node`
+    key_byte_offset: usize,
+    key: K,
+    value: V,
 }
 
 #[cfg(test)]

@@ -278,6 +278,12 @@ pub struct KeyBuilder {
     key: ByteString,
 }
 
+impl Default for KeyBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyBuilder {
     pub fn new() -> Self {
         Self {
