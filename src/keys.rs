@@ -2,7 +2,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::mem;
 
-/// Trait represent [Art] key.
+/// Trait represent [Art](crate::Art) key.
 /// Trait define method which convert key into byte comparable sequence. This sequence will be
 /// used to order keys inside tree.
 pub trait Key {
@@ -13,7 +13,7 @@ pub trait Key {
     /// Implementation must ensure that returned bytes vector have consistent order of bytes. E.g.
     /// key type must have same ordering guarantees as returned byte sequence.  
     /// For instance, if `"abc" < "def"`, then `"abc".to_bytes() < "def".to_bytes()`.
-    /// **Violation** of this rule is **undefined behaviour** and can cause `panic`.
+    /// Violation of this rule is **undefined behaviour** and can cause `panic`.
     fn to_bytes(&self) -> Vec<u8>;
 }
 
@@ -152,6 +152,7 @@ impl Key for i128 {
     }
 }
 
+/// Type to represent `f32` keys
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Float32 {
@@ -196,6 +197,7 @@ impl From<f32> for Float32 {
     }
 }
 
+/// Type to represent `f64` keys
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Float64 {
@@ -253,6 +255,7 @@ impl Key for Float64 {
 }
 
 /// Builder to create keys based on several other keys.
+///
 /// For instance, we have a structure:
 /// ```
 /// struct MyStruct(u8, String, u32, Box<f64>);
