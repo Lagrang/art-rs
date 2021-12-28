@@ -309,13 +309,13 @@ impl<K: Key, V> Art<K, V> {
             // we have a prefix match, now try to find next byte of key which follows immediately
             // after prefix.
             interim.get_mut(key_bytes[prefix.len()]).map(|node| {
-                let key_in_parent = key_bytes[prefix.len()];
+                let key_byte_in_parent = key_bytes[prefix.len()];
                 let key_bytes = if key_bytes.len() > prefix.len() + 1 {
                     &key_bytes[prefix.len() + 1..]
                 } else {
                     &[]
                 };
-                (node, key_bytes, key_in_parent)
+                (node, key_bytes, key_byte_in_parent)
             })
         }
     }
@@ -345,9 +345,11 @@ impl<K: Key, V> Art<K, V> {
         }
 
         let leaf_key_bytes = leaf.key.to_bytes();
+        // skip bytes which covered by upper levels of tree
         let leaf_key = &leaf_key_bytes[key_start_offset..];
         let key_bytes = &key_bytes[key_start_offset..];
 
+        // compute common prefix between existing key(found in leaf node) and key of new KV pair
         let prefix_size = common_prefix_len(leaf_key, key_bytes);
 
         let prefix = &leaf_key[..prefix_size];
@@ -355,13 +357,15 @@ impl<K: Key, V> Art<K, V> {
         let key_bytes = &key_bytes[prefix_size..];
 
         let new_interim = if leaf_key.is_empty() {
-            // existing leaf key is shorter than new key.
+            // prefix covers entire leaf key => existing leaf key is shorter than new key.
+            // in this case we replace existing leaf by new 'combined' node which will point to
+            // existing leaf and new interim node(which will hold new KV).
             let mut new_interim = FlatNode::new(prefix);
-            // safely move out value from node holder because
-            // later we will override it without drop
             let err = new_interim.insert(key_bytes[0], TypedNode::Leaf(Leaf::new(key, value)));
             debug_assert!(err.is_none());
 
+            // safely move out value from node holder because
+            // later we will override it without drop
             let existing_leaf = unsafe { ptr::read(leaf) };
             TypedNode::Combined(
                 Box::new(TypedNode::Interim(BoxedNode::Size4(Box::new(new_interim)))),
@@ -369,7 +373,7 @@ impl<K: Key, V> Art<K, V> {
             )
         } else if key_bytes.is_empty() {
             // no more bytes left in key of new KV => create combined node which will
-            // point to new key and existing leaf will be moved into new interim node.
+            // point to new key, existing leaf will be moved into new interim node.
             // in this case, key of existing leaf is always longer(length in bytes) than new
             // key(if leaf key has the same length as new key, then keys are equal).
             let mut new_interim = FlatNode::new(prefix);
@@ -384,6 +388,9 @@ impl<K: Key, V> Art<K, V> {
                 Leaf::new(key, value),
             )
         } else {
+            // existing leaf and new KV has common prefix => create new interim node which will
+            // hold both KVs.
+
             // safely move out value from node holder because
             // later we will override it without drop
             let leaf = unsafe { ptr::read(leaf) };
@@ -411,14 +418,12 @@ impl<K: Key, V> Art<K, V> {
             // no more bytes in key to go deeper inside the tree => replace interim by combined node
             // which will contains link to existing interim and leaf node with new KV.
             unsafe {
-                let interim = ptr::read(interim);
-                ptr::write(
-                    node_ptr,
-                    TypedNode::Combined(
-                        Box::new(TypedNode::Interim(interim)),
-                        Leaf::new(key, value),
-                    ),
-                )
+                let existing_interim = ptr::read(interim);
+                let new_interim = TypedNode::Combined(
+                    Box::new(TypedNode::Interim(existing_interim)),
+                    Leaf::new(key, value),
+                );
+                ptr::write(node_ptr, new_interim)
             }
             return Ok(true);
         }
@@ -431,14 +436,12 @@ impl<K: Key, V> Art<K, V> {
             // existing interim prefix fully equals to new key: replace existing interim by combined
             // node which will contain new key and link to existing values of interim
             unsafe {
-                let interim = ptr::read(interim);
-                ptr::write(
-                    node_ptr,
-                    TypedNode::Combined(
-                        Box::new(TypedNode::Interim(interim)),
-                        Leaf::new(key, value),
-                    ),
-                )
+                let existing_interim = ptr::read(interim);
+                let new_node = TypedNode::Combined(
+                    Box::new(TypedNode::Interim(existing_interim)),
+                    Leaf::new(key, value),
+                );
+                ptr::write(node_ptr, new_node)
             };
             Ok(true)
         } else if prefix_size < prefix.len() {
@@ -474,7 +477,10 @@ impl<K: Key, V> Art<K, V> {
         } else {
             let interim_ptr = unsafe { &mut *(interim as *mut BoxedNode<TypedNode<K, V>>) };
             if let Some(next_node) = interim.get_mut(key_bytes[prefix_size]) {
-                // try to insert on the next level of tree
+                // interim already contains node with same 'next byte', we will try to insert on
+                // the next level of tree. Existing node may be:
+                // - leaf node: in this case leaf node will be replaced by interim node
+                // - interim node: in this case we retry this method
                 Err(InsertOp {
                     node: next_node,
                     key_byte_offset: key_start_offset + prefix_size + 1,
