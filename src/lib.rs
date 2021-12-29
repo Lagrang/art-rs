@@ -38,6 +38,7 @@ use crate::scanner::Scanner;
 pub use keys::ByteString;
 pub use keys::*;
 use node::*;
+use std::arch::x86_64;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -511,6 +512,20 @@ impl<K: Key, V> Art<K, V> {
 }
 
 fn common_prefix_len(vec1: &[u8], vec2: &[u8]) -> usize {
+    // #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    // {
+    //     let mut len = 0;
+    //     let mut vec_len = cmp::min(vec1.len(), vec2.len());
+    //     while len < vec_len {
+    //         unsafe {
+    //             let val =
+    //                 ((x86_64::_tzcnt_u32((vec1[len] ^ vec2[len]) as u32) & 0x20) >> 5) as usize;
+    //             vec_len *= val;
+    //             len += val;
+    //         }
+    //     }
+    //     return len;
+    // }
     let mut len = 0;
     for i in 0..cmp::min(vec1.len(), vec2.len()) {
         if vec1[i] != vec2[i] {

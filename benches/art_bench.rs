@@ -6,7 +6,7 @@ use rand::{thread_rng, Rng};
 use std::collections::HashSet;
 use std::time::Instant;
 
-pub fn modifications(c: &mut Criterion) {
+pub fn insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("modification");
     group.throughput(Throughput::Elements(1));
     group.bench_function("seq_insert", |b| {
@@ -14,6 +14,15 @@ pub fn modifications(c: &mut Criterion) {
         let mut key = 0u64;
         b.iter(|| {
             tree.insert(key, key);
+            key += 1;
+        })
+    });
+
+    group.bench_function("seq_upsert", |b| {
+        let mut tree = Art::new();
+        let mut key = 0u64;
+        b.iter(|| {
+            tree.upsert(key, key);
             key += 1;
         })
     });
@@ -28,15 +37,6 @@ pub fn modifications(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("seq_upsert", |b| {
-        let mut tree = Art::new();
-        let mut key = 0u64;
-        b.iter(|| {
-            tree.upsert(key, key);
-            key += 1;
-        })
-    });
-
     group.bench_function("rand_upsert", |b| {
         let mut tree = Art::new();
         let mut rng = thread_rng();
@@ -46,7 +46,12 @@ pub fn modifications(c: &mut Criterion) {
             tree.upsert(ByteString::new(key.as_bytes()), key.clone());
         })
     });
+    group.finish();
+}
 
+pub fn delete(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modification");
+    group.throughput(Throughput::Elements(1));
     group.bench_function("remove", |b| {
         let mut tree = Art::new();
         b.iter_custom(|iters| {
@@ -58,6 +63,19 @@ pub fn modifications(c: &mut Criterion) {
                 tree.remove(&i);
             }
             start.elapsed()
+        })
+    });
+
+    group.bench_function("rand_remove", |b| {
+        let mut tree = Art::new();
+        let mut rng = thread_rng();
+        let keys = gen_keys(3, 2, 3);
+        for key in &keys {
+            tree.upsert(ByteString::new(key.as_bytes()), key.clone());
+        }
+        b.iter(|| {
+            let key = &keys[rng.gen_range(0..keys.len())];
+            tree.remove(&ByteString::new(key.as_bytes()));
         })
     });
     group.finish();
@@ -166,7 +184,8 @@ fn gen_keys(l1_prefix: usize, l2_prefix: usize, suffix: usize) -> Vec<String> {
     res
 }
 
-criterion_group!(mods, modifications);
+criterion_group!(mods, insert);
+criterion_group!(dels, delete);
 criterion_group!(gets, access);
 criterion_group!(iters, iter);
-criterion_main!(mods, gets, iters);
+criterion_main!(mods, dels, gets, iters);

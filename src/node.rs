@@ -76,7 +76,7 @@ impl<V, const N: usize> Node<V> for FlatNode<V, N> {
     }
 
     fn drain(mut self) -> Vec<(u8, V)> {
-        let mut res = Vec::new();
+        let mut res = Vec::with_capacity(self.len);
         for i in 0..self.len {
             unsafe {
                 let value = mem::replace(&mut self.values[i], MaybeUninit::uninit()).assume_init();
@@ -266,7 +266,7 @@ impl<V> Node<V> for Node48<V> {
     }
 
     fn drain(mut self) -> Vec<(u8, V)> {
-        let mut res = Vec::new();
+        let mut res = Vec::with_capacity(self.len);
         for (k, v) in self.keys.iter().enumerate().filter(|(_, v)| **v > 0) {
             let val_idx = *v as usize;
             let value = unsafe {
@@ -358,7 +358,7 @@ impl<V> Node<V> for Node256<V> {
     }
 
     fn drain(mut self) -> Vec<(u8, V)> {
-        let mut res = Vec::new();
+        let mut res = Vec::with_capacity(self.len);
         for i in 0..self.values.len() {
             if let Some(v) = self.values[i].take() {
                 res.push((i as u8, v))
